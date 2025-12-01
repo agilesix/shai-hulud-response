@@ -1,45 +1,25 @@
 #Requires -Version 5.1
 
 <#
-
 .SYNOPSIS
-
     Shai-Hulud 2.0 Scanner - Native PowerShell Edition
-
     
-
 .DESCRIPTION
-
     Scans Windows endpoints for npm packages compromised by the Shai-Hulud 
-
     supply chain attack. Downloads Cobenian's compromised packages list and
-
     performs all scanning natively in PowerShell (no bash/WSL required).
-
     
-
     Features:
-
     - Self-backgrounding: Action1 exits immediately, scan runs independently
-
     - Version-aware: Checks exact package:version pairs (no false positives)
-
     - Performance-friendly: Runs at reduced priority
-
     - Error capture: Reports environment issues to Google Sheets
-
     
-
 .VERSION
-
-    2.0.3
-
+    2.0.6
     
-
 .NOTES
-
     Deploy via Action1 MDM. Results sent to webhook -> Google Sheets.
-
 #>
 
 ###############################################################################
@@ -48,7 +28,7 @@
 
 $WEBHOOK_URL = "https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
 $SECRET = 'agile6isawesome!@#$QWERandSuperAWEsome'
-$SCANNER_VERSION = "2.0.3"
+$SCANNER_VERSION = "2.0.6"
 $MAX_PROJECTS = 200
 
 # PERFORMANCE SETTINGS
@@ -367,12 +347,19 @@ function Get-CompromisedPackagesInProject {
     if (Test-Path $lockFile) {
         try {
             $lockContent = Get-Content $lockFile -Raw -ErrorAction Stop
+            
+            # PowerShell 5.1 CANNOT parse JSON with empty string keys like "": {...}
+            # npm lockfile v3 uses this for the root package. We must remove it.
+            # Replace "": { with "__root__": { to make it parseable
+            $lockContent = $lockContent -replace '""\s*:\s*\{', '"__root__": {'
+            
             $lock = $lockContent | ConvertFrom-Json -ErrorAction Stop
             
             # npm lockfile v2/v3 format (lockfileVersion 2 or 3)
             if ($lock.packages) {
                 foreach ($pkgPath in $lock.packages.PSObject.Properties.Name) {
-                    if (-not $pkgPath) { continue }  # Skip root
+                    # Skip root package (either empty or our renamed __root__)
+                    if (-not $pkgPath -or $pkgPath -eq "__root__") { continue }
                     
                     $pkgInfo = $lock.packages.$pkgPath
                     $version = $pkgInfo.version
@@ -422,7 +409,7 @@ function Get-CompromisedPackagesInProject {
                 }
             }
         } catch {
-            Write-Log "    Warning: Could not parse lockfile in $ProjectPath"
+            Write-Log "    Warning: Could not parse lockfile in $ProjectPath - $_"
         }
     } else {
         # Fallback: check package.json for exact versions only

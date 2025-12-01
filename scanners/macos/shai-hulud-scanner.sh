@@ -2,7 +2,7 @@
 
 ###############################################################################
 # SHAI-HULUD 2.0 SCANNER - SELF-BACKGROUNDING (ALL-IN-ONE)
-# Version: 2.0.3
+# Version: 2.0.5
 # 
 # This single script handles everything:
 # 1. When run by Kandji, it copies itself and launches in background
@@ -24,7 +24,7 @@
 
 WEBHOOK_URL="https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
 SECRET='agile6isawesome!@#$QWERandSuperAWEsome'
-SCANNER_VERSION="2.0.3"
+SCANNER_VERSION="2.0.5"
 MAX_PROJECTS=200
 
 # PERFORMANCE SETTINGS
@@ -85,22 +85,28 @@ else
   
   echo "Launching scanner in background..."
   
-  # Launch detached background process
-  nohup /bin/zsh "${SCRIPT_COPY}" --background "${TEMP_DIR}" >> "${LOG_FILE}" 2>&1 &
-  BG_PID=$!
-  disown $BG_PID
+  # Double-fork to fully daemonize (survives parent exit)
+  # First fork creates child, second fork creates orphaned grandchild
+  # This is the classic Unix daemonization pattern
+  ( ( /bin/zsh "${SCRIPT_COPY}" --background "${TEMP_DIR}" >> "${LOG_FILE}" 2>&1 ) & )
   
-  # Write lock file
-  echo $BG_PID > "$LOCK_FILE"
+  # Give it a moment to start
+  sleep 2
   
-  sleep 1
-  
-  if kill -0 $BG_PID 2>/dev/null; then
-    echo "✅ Scanner launched (PID: $BG_PID)"
+  # Check if process is running
+  SCANNER_PID=$(pgrep -f "shai-hulud.*--background" 2>/dev/null | head -1)
+  if [[ -n "$SCANNER_PID" ]]; then
+    echo "$SCANNER_PID" > "$LOCK_FILE"
+    echo "✅ Scanner launched (PID: $SCANNER_PID)"
     echo "Log: ${LOG_FILE}"
     echo "Results will be sent to webhook when complete."
   else
-    echo "⚠️  Scanner may have exited - check ${LOG_FILE}"
+    # Check if it already completed (fast scan)
+    if [[ -f "${LOG_FILE}" ]] && grep -q "Scanner Complete" "${LOG_FILE}" 2>/dev/null; then
+      echo "✅ Scanner already completed (fast run)"
+    else
+      echo "⚠️  Scanner may have exited - check ${LOG_FILE}"
+    fi
   fi
   
   echo "Launcher exiting."
