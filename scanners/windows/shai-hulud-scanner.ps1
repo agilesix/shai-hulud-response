@@ -27,7 +27,7 @@
 ###############################################################################
 
 $WEBHOOK_URL = "https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
-$SECRET = 'agile6isawesome!@#$QWERandSuperAWEsome'
+$SECRET = 'X$GMLOSnkrIyWbG#yFn%Izyj%5FR9r%AOo%lGKXr'
 $SCANNER_VERSION = "2.0.6"
 $MAX_PROJECTS = 200
 
