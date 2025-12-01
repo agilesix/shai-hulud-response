@@ -1,22 +1,46 @@
 #Requires -Version 5.1
 
-###############################################################################
-# SHAI-HULUD 2.0 SCANNER - SELF-BACKGROUNDING (ALL-IN-ONE)
-# Version: 2.0.3
-# 
-# This single script handles everything:
-# 1. When run by Kandji, it copies itself and launches in background
-# 2. The backgrounded copy does the actual scanning
-# 3. Results are sent to webhook when complete
-#
-# Features:
-# - No timeout: Backgrounds itself so Kandji exits immediately
-# - Version-aware: Uses Cobenian detector for accurate detection
-# - Performance-friendly: Runs at reduced priority
-# - Error capture: Reports environment issues to Google Sheets
-#
-# No need to host separate files - just deploy this one script to Kandji.
-###############################################################################
+<#
+
+.SYNOPSIS
+
+    Shai-Hulud 2.0 Scanner - Native PowerShell Edition
+
+    
+
+.DESCRIPTION
+
+    Scans Windows endpoints for npm packages compromised by the Shai-Hulud 
+
+    supply chain attack. Downloads Cobenian's compromised packages list and
+
+    performs all scanning natively in PowerShell (no bash/WSL required).
+
+    
+
+    Features:
+
+    - Self-backgrounding: Action1 exits immediately, scan runs independently
+
+    - Version-aware: Checks exact package:version pairs (no false positives)
+
+    - Performance-friendly: Runs at reduced priority
+
+    - Error capture: Reports environment issues to Google Sheets
+
+    
+
+.VERSION
+
+    2.0.3
+
+    
+
+.NOTES
+
+    Deploy via Action1 MDM. Results sent to webhook -> Google Sheets.
+
+#>
 
 ###############################################################################
 # CONFIG
@@ -28,12 +52,10 @@ $SCANNER_VERSION = "2.0.3"
 $MAX_PROJECTS = 200
 
 # PERFORMANCE SETTINGS
-# Balanced settings - runs efficiently without hogging resources
-$DELAY_BETWEEN_PROJECTS = 0.2  # Brief pause to prevent sustained 100% CPU
-$SKIP_IF_ON_BATTERY = $false  # Set to $true to skip scan when on battery
+$DELAY_BETWEEN_PROJECTS = 0.2  # Seconds between projects
+$SKIP_IF_ON_BATTERY = $false   # Set to $true to skip when on battery
 
-# Cobenian scanner URLs (does proper version checking)
-$DETECTOR_URL = "https://raw.githubusercontent.com/Cobenian/shai-hulud-detect/main/shai-hulud-detector.sh"
+# Cobenian packages list (we only need this - scanning logic is native PowerShell)
 $PACKAGES_URL = "https://raw.githubusercontent.com/Cobenian/shai-hulud-detect/main/compromised-packages.txt"
 
 $SCAN_DIRS = @(
@@ -49,13 +71,11 @@ $LOG_FILE = Join-Path $WORK_DIR "scanner.log"
 ###############################################################################
 
 if ($args[0] -eq "--background") {
-    # We ARE the background process - do the actual scanning
     $TEMP_DIR = $args[1]
-    
     # Continue to scanning section below
 } else {
     ###########################################################################
-    # FOREGROUND MODE - Launch background and exit
+    # FOREGROUND MODE - Launch background and exit immediately
     ###########################################################################
     
     Write-Host "=== Shai-Hulud 2.0 Scanner Launcher v$SCANNER_VERSION ==="
@@ -63,42 +83,52 @@ if ($args[0] -eq "--background") {
     
     # Check for existing run
     if (Test-Path $LOCK_FILE) {
-        $EXISTING_PID = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
-        if ($EXISTING_PID -and (Get-Process -Id $EXISTING_PID -ErrorAction SilentlyContinue)) {
-            Write-Host "Scanner already running (PID: $EXISTING_PID). Exiting."
-            exit 0
+        $lockContent = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
+        if ($lockContent) {
+            $existingPid = [int]$lockContent
+            $existingProcess = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
+            if ($existingProcess) {
+                Write-Host "Scanner already running (PID: $existingPid). Exiting."
+                exit 0
+            }
         }
         Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
     }
     
-    # Setup
+    # Setup directories
     New-Item -ItemType Directory -Path $WORK_DIR -Force | Out-Null
     $TEMP_DIR = Join-Path $WORK_DIR "scan-$PID"
     New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
     
-    # Copy this script to temp location for background execution
+    # Copy script for background execution
     $SCRIPT_COPY = Join-Path $TEMP_DIR "scanner.ps1"
-    Copy-Item $MyInvocation.PSCommandPath $SCRIPT_COPY -Force
+    Copy-Item -Path $MyInvocation.MyCommand.Path -Destination $SCRIPT_COPY -Force
     
     Write-Host "Launching scanner in background..."
     
-    # Launch detached background process
-    $job = Start-Job -ScriptBlock {
-        param($ScriptPath, $TempDir, $LogFile)
-        & $ScriptPath --background $TempDir *>> $LogFile
-    } -ArgumentList $SCRIPT_COPY, $TEMP_DIR, $LOG_FILE
+    # Launch truly detached background process using Start-Process
+    # This creates a new process that survives parent exit
+    $processArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$SCRIPT_COPY`" --background `"$TEMP_DIR`""
+    $bgProcess = Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $processArgs `
+        -WindowStyle Hidden `
+        -PassThru `
+        -RedirectStandardOutput (Join-Path $TEMP_DIR "stdout.log") `
+        -RedirectStandardError (Join-Path $TEMP_DIR "stderr.log")
     
-    # Write lock file with job ID (PowerShell job IDs are different from PIDs)
-    $job.Id | Out-File $LOCK_FILE -Force
+    # Write lock file with actual PID
+    $bgProcess.Id | Out-File -FilePath $LOCK_FILE -Force
     
-    Start-Sleep -Seconds 1
+    Start-Sleep -Seconds 2
     
-    if ($job.State -eq "Running") {
-        Write-Host "✅ Scanner launched (Job ID: $($job.Id))"
+    # Verify process started
+    $checkProcess = Get-Process -Id $bgProcess.Id -ErrorAction SilentlyContinue
+    if ($checkProcess) {
+        Write-Host "Scanner launched (PID: $($bgProcess.Id))"
         Write-Host "Log: $LOG_FILE"
         Write-Host "Results will be sent to webhook when complete."
     } else {
-        Write-Host "⚠️  Scanner may have exited - check $LOG_FILE"
+        Write-Host "WARNING: Scanner may have exited - check logs"
     }
     
     Write-Host "Launcher exiting."
@@ -109,100 +139,100 @@ if ($args[0] -eq "--background") {
 # BACKGROUND MODE - ACTUAL SCANNING STARTS HERE
 ###############################################################################
 
-function Log {
+# Redirect all output to log file
+Start-Transcript -Path $LOG_FILE -Append -Force | Out-Null
+
+function Write-Log {
     param([string]$Message)
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Output "[$timestamp] $Message"
+    Write-Host "[$timestamp] $Message"
 }
 
-function Cleanup {
-    Log "Cleaning up..."
+function Remove-LockAndCleanup {
+    Write-Log "Cleaning up..."
     if ($TEMP_DIR -and (Test-Path $TEMP_DIR)) {
-        Remove-Item $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $TEMP_DIR -Recurse -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path $LOCK_FILE) {
-        Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
+        Remove-Item -Path $LOCK_FILE -Force -ErrorAction SilentlyContinue
     }
+    Stop-Transcript -ErrorAction SilentlyContinue | Out-Null
 }
 
-# Register cleanup on exit
-Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action { Cleanup } | Out-Null
+# Write our PID to lock file
+$PID | Out-File -FilePath $LOCK_FILE -Force
 
-Log "=== Background Scanner Started (PID: $PID) ==="
+Write-Log "=== Background Scanner Started (PID: $PID) ==="
 
 ###############################################################################
 # ENVIRONMENT CHECKS & ERROR CAPTURE
 ###############################################################################
 
-$WARNINGS = ""
+$WARNINGS = @()
 
-# Check if user is logged in at console
+# Get current user
 try {
     $CURRENT_USER = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-    if ($CURRENT_USER -match "SYSTEM" -or $CURRENT_USER -match "NT AUTHORITY") {
-        $WARNINGS += "No user logged in at console; "
-        Log "WARNING: Running as system account"
+    if ($CURRENT_USER -match "SYSTEM|NT AUTHORITY") {
+        $WARNINGS += "Running as SYSTEM account"
+        Write-Log "WARNING: Running as SYSTEM account"
     }
 } catch {
-    $WARNINGS += "Could not determine user; "
-    Log "WARNING: Could not determine current user"
+    $CURRENT_USER = $env:USERNAME
+    if (-not $CURRENT_USER) { $CURRENT_USER = "Unknown" }
+    $WARNINGS += "Could not determine user"
 }
 
 # Check power source
 try {
     $battery = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
-    if ($battery) {
-        if ($battery.BatteryStatus -eq 2) {  # 2 = On battery
-            $WARNINGS += "Running on battery; "
-            Log "INFO: Running on battery power"
-        }
+    if ($battery -and $battery.BatteryStatus -eq 1) {
+        $WARNINGS += "Running on battery"
+        Write-Log "INFO: Running on battery power"
     }
+} catch { }
+
+# Check Windows version
+try {
+    $osInfo = Get-CimInstance Win32_OperatingSystem
+    Write-Log "INFO: Windows $($osInfo.Caption) - $($osInfo.Version)"
 } catch {
-    # Battery check failed, continue
+    Write-Log "INFO: Could not determine Windows version"
 }
 
-# Check Windows version for compatibility logging
+# Check disk space
 try {
-    $OS_VERSION = (Get-CimInstance Win32_OperatingSystem).Version
-    Log "INFO: Windows version: $OS_VERSION"
-} catch {
-    Log "INFO: Could not determine Windows version"
-}
-
-# Check available disk space (warn if < 1GB)
-try {
-    $drive = Get-PSDrive -Name (Split-Path $env:TEMP -Qualifier).TrimEnd(':')
-    $availableSpaceGB = $drive.Free / 1GB
-    if ($availableSpaceGB -lt 1) {
-        $WARNINGS += "Low disk space (<1GB); "
-        Log "WARNING: Low disk space on $env:TEMP"
+    $tempDrive = (Get-Item $env:TEMP).PSDrive
+    $freeGB = [math]::Round($tempDrive.Free / 1GB, 2)
+    if ($freeGB -lt 1) {
+        $WARNINGS += "Low disk space (${freeGB}GB)"
+        Write-Log "WARNING: Low disk space on temp drive"
     }
-} catch {
-    # Disk space check failed, continue
-}
+} catch { }
 
-# Check network connectivity to GitHub
+# Check network connectivity
 try {
-    $response = Invoke-WebRequest -Uri "https://github.com" -Method Head -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
+    $null = Invoke-WebRequest -Uri "https://github.com" -Method Head -TimeoutSec 5 -UseBasicParsing -ErrorAction Stop
 } catch {
-    Log "ERROR: Cannot reach github.com - network may be unavailable"
-    # Still try to continue, will fail at download step with proper error
+    Write-Log "WARNING: Cannot reach github.com"
+    $WARNINGS += "Network connectivity issue"
 }
 
 ###############################################################################
 # PERFORMANCE SAFEGUARDS
 ###############################################################################
 
-# Check if on battery (optional skip)
+# Optional: Skip if on battery
 if ($SKIP_IF_ON_BATTERY) {
     try {
         $battery = Get-CimInstance -ClassName Win32_Battery -ErrorAction SilentlyContinue
-        if ($battery -and $battery.BatteryStatus -eq 2) {
-            Log "On battery power - skipping scan (SKIP_IF_ON_BATTERY=true)"
-            $body = @{
+        if ($battery -and $battery.BatteryStatus -eq 1) {
+            Write-Log "On battery power - skipping scan"
+            # Send skip notification and exit
+            $skipBody = @{
                 secret = $SECRET
-                serial = $SERIAL
-                hostname = $HOSTNAME
+                serial = "Unknown"
+                hostname = $env:COMPUTERNAME
                 user = $CURRENT_USER
                 os = "Windows"
                 status = "skipped"
@@ -214,65 +244,65 @@ if ($SKIP_IF_ON_BATTERY) {
                 scan_duration_ms = 0
                 scanner_version = $SCANNER_VERSION
                 raw_output = "Skipped - on battery power"
-            } | ConvertTo-Json
+            } | ConvertTo-Json -Compress
             
-            Invoke-RestMethod -Uri $WEBHOOK_URL -Method Post -Body $body -ContentType "application/json" -ErrorAction SilentlyContinue | Out-Null
+            try {
+                Invoke-RestMethod -Uri $WEBHOOK_URL -Method Post -Body $skipBody -ContentType "application/json" -TimeoutSec 30 | Out-Null
+            } catch { }
+            
+            Remove-LockAndCleanup
             exit 0
         }
-    } catch {
-        # Continue if battery check fails
-    }
+    } catch { }
 }
 
-# Lower our CPU priority so we don't compete with user apps
+# Lower CPU priority
 try {
-    $process = Get-Process -Id $PID
-    $process.PriorityClass = "BelowNormal"
+    $currentProcess = Get-Process -Id $PID
+    $currentProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal
+    Write-Log "Set process priority to BelowNormal"
 } catch {
-    # Priority change failed, continue
+    Write-Log "Could not adjust process priority"
 }
 
 ###############################################################################
 # GATHER DEVICE INFO
 ###############################################################################
 
-Log "Step 1: Gathering device info..."
+Write-Log "Step 1: Gathering device info..."
 
+$SERIAL = "Unknown"
 try {
-    $CURRENT_USER = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-} catch {
-    $CURRENT_USER = $env:USERNAME
-}
-
-try {
-    $SERIAL = (Get-CimInstance Win32_BaseBoard).SerialNumber
-    if (-not $SERIAL) {
-        $SERIAL = (Get-CimInstance Win32_BIOS).SerialNumber
+    $bios = Get-CimInstance Win32_BIOS -ErrorAction Stop
+    $SERIAL = $bios.SerialNumber
+    if (-not $SERIAL -or $SERIAL -eq "To be filled by O.E.M.") {
+        $board = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue
+        if ($board.SerialNumber) {
+            $SERIAL = $board.SerialNumber
+        }
     }
 } catch {
-    $SERIAL = "Unknown"
+    Write-Log "WARNING: Could not get serial number"
 }
 
 $HOSTNAME = $env:COMPUTERNAME
-$TIMESTAMP_UTC = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
-$START_TIME = (Get-Date).ToUniversalTime()
+$START_TIME = Get-Date
 
-Log "Host: $HOSTNAME | Serial: $SERIAL | User: $CURRENT_USER"
+Write-Log "Host: $HOSTNAME | Serial: $SERIAL | User: $CURRENT_USER"
 
 ###############################################################################
-# DOWNLOAD COBENIAN SCANNER
+# DOWNLOAD COMPROMISED PACKAGES LIST
 ###############################################################################
 
-Log "Step 2: Downloading Cobenian scanner..."
+Write-Log "Step 2: Downloading compromised packages list..."
 
-$DETECTOR_SCRIPT = Join-Path $TEMP_DIR "shai-hulud-detector.sh"
 $PACKAGES_FILE = Join-Path $TEMP_DIR "compromised-packages.txt"
 
-function Send-Error {
+function Send-ErrorReport {
     param([string]$Message)
-    Log "ERROR: $Message"
+    Write-Log "ERROR: $Message"
     
-    $body = @{
+    $errorBody = @{
         secret = $SECRET
         serial = $SERIAL
         hostname = $HOSTNAME
@@ -287,79 +317,200 @@ function Send-Error {
         scan_duration_ms = 0
         scanner_version = $SCANNER_VERSION
         raw_output = $Message
-    } | ConvertTo-Json
+    } | ConvertTo-Json -Compress
     
     try {
-        Invoke-RestMethod -Uri $WEBHOOK_URL -Method Post -Body $body -ContentType "application/json" -ErrorAction SilentlyContinue | Out-Null
+        Invoke-RestMethod -Uri $WEBHOOK_URL -Method Post -Body $errorBody -ContentType "application/json" -TimeoutSec 30 | Out-Null
     } catch {
-        # Error sending error report, continue
+        Write-Log "Failed to send error report"
     }
 }
 
 try {
-    Invoke-WebRequest -Uri $DETECTOR_URL -OutFile $DETECTOR_SCRIPT -TimeoutSec 60 -ErrorAction Stop
+    Invoke-WebRequest -Uri $PACKAGES_URL -OutFile $PACKAGES_FILE -TimeoutSec 60 -UseBasicParsing -ErrorAction Stop
 } catch {
-    Send-Error "Failed to download Cobenian detector script"
+    Send-ErrorReport "Failed to download compromised packages list: $_"
+    Remove-LockAndCleanup
     exit 1
 }
 
-try {
-    Invoke-WebRequest -Uri $PACKAGES_URL -OutFile $PACKAGES_FILE -TimeoutSec 60 -ErrorAction Stop
-} catch {
-    Send-Error "Failed to download compromised packages list"
-    exit 1
+# Parse compromised packages into hashtable for O(1) lookups
+# Format: package_name:version
+$CompromisedPackages = @{}
+$packageLines = Get-Content $PACKAGES_FILE -ErrorAction SilentlyContinue
+
+foreach ($line in $packageLines) {
+    $line = $line.Trim()
+    if ($line -and -not $line.StartsWith('#')) {
+        $CompromisedPackages[$line] = $true
+    }
 }
 
-# Count packages (excluding comments and empty lines)
-$PACKAGE_COUNT = (Get-Content $PACKAGES_FILE | Where-Object { $_ -notmatch '^\s*#' -and $_ -notmatch '^\s*$' }).Count
-Log "Downloaded detector + $PACKAGE_COUNT compromised package signatures"
+$PACKAGE_COUNT = $CompromisedPackages.Count
+Write-Log "Loaded $PACKAGE_COUNT compromised package:version signatures"
+
+###############################################################################
+# NATIVE POWERSHELL LOCKFILE PARSER
+###############################################################################
+
+function Get-CompromisedPackagesInProject {
+    param(
+        [string]$ProjectPath,
+        [hashtable]$CompromisedList
+    )
+    
+    $findings = @()
+    
+    # Check package-lock.json first (has exact versions)
+    $lockFile = Join-Path $ProjectPath "package-lock.json"
+    
+    if (Test-Path $lockFile) {
+        try {
+            $lockContent = Get-Content $lockFile -Raw -ErrorAction Stop
+            $lock = $lockContent | ConvertFrom-Json -ErrorAction Stop
+            
+            # npm lockfile v2/v3 format (lockfileVersion 2 or 3)
+            if ($lock.packages) {
+                foreach ($pkgPath in $lock.packages.PSObject.Properties.Name) {
+                    if (-not $pkgPath) { continue }  # Skip root
+                    
+                    $pkgInfo = $lock.packages.$pkgPath
+                    $version = $pkgInfo.version
+                    
+                    if (-not $version) { continue }
+                    
+                    # Extract package name from path like "node_modules/@scope/pkg"
+                    $pkgName = $pkgPath
+                    if ($pkgPath -match 'node_modules[/\\](.+)$') {
+                        $pkgName = $Matches[1]
+                    }
+                    
+                    # Check against compromised list
+                    $checkKey = "${pkgName}:${version}"
+                    if ($CompromisedList.ContainsKey($checkKey)) {
+                        $findings += "${pkgName}@${version}"
+                    }
+                }
+            }
+            
+            # npm lockfile v1 format (older)
+            if ($findings.Count -eq 0 -and $lock.dependencies) {
+                $depsToCheck = New-Object System.Collections.Queue
+                
+                foreach ($depName in $lock.dependencies.PSObject.Properties.Name) {
+                    $depsToCheck.Enqueue(@{Name = $depName; Info = $lock.dependencies.$depName})
+                }
+                
+                while ($depsToCheck.Count -gt 0) {
+                    $dep = $depsToCheck.Dequeue()
+                    $depName = $dep.Name
+                    $depInfo = $dep.Info
+                    
+                    if ($depInfo.version) {
+                        $checkKey = "${depName}:$($depInfo.version)"
+                        if ($CompromisedList.ContainsKey($checkKey)) {
+                            $findings += "${depName}@$($depInfo.version)"
+                        }
+                    }
+                    
+                    # Check nested dependencies
+                    if ($depInfo.dependencies) {
+                        foreach ($nestedName in $depInfo.dependencies.PSObject.Properties.Name) {
+                            $depsToCheck.Enqueue(@{Name = $nestedName; Info = $depInfo.dependencies.$nestedName})
+                        }
+                    }
+                }
+            }
+        } catch {
+            Write-Log "    Warning: Could not parse lockfile in $ProjectPath"
+        }
+    } else {
+        # Fallback: check package.json for exact versions only
+        $pkgJsonFile = Join-Path $ProjectPath "package.json"
+        
+        if (Test-Path $pkgJsonFile) {
+            try {
+                $pkgContent = Get-Content $pkgJsonFile -Raw -ErrorAction Stop
+                $pkg = $pkgContent | ConvertFrom-Json -ErrorAction Stop
+                
+                $depTypes = @('dependencies', 'devDependencies', 'optionalDependencies')
+                
+                foreach ($depType in $depTypes) {
+                    if ($pkg.$depType) {
+                        foreach ($depName in $pkg.$depType.PSObject.Properties.Name) {
+                            $versionSpec = $pkg.$depType.$depName
+                            
+                            # Only check exact versions (no ^, ~, >, <, *, etc.)
+                            if ($versionSpec -and $versionSpec -notmatch '[\^~><*|x ]') {
+                                $checkKey = "${depName}:${versionSpec}"
+                                if ($CompromisedList.ContainsKey($checkKey)) {
+                                    $findings += "${depName}@${versionSpec}"
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch {
+                Write-Log "    Warning: Could not parse package.json in $ProjectPath"
+            }
+        }
+    }
+    
+    return $findings | Select-Object -Unique
+}
 
 ###############################################################################
 # FIND NPM PROJECTS
 ###############################################################################
 
-Log "Step 3: Finding npm projects..."
+Write-Log "Step 3: Finding npm projects..."
+
 $NPM_PROJECTS = @()
 
 foreach ($baseDir in $SCAN_DIRS) {
-    if (Test-Path $baseDir) {
-        $packageFiles = Get-ChildItem -Path $baseDir -Filter "package.json" -Recurse -Depth 6 -File -ErrorAction SilentlyContinue | 
+    if (-not (Test-Path $baseDir)) { continue }
+    
+    try {
+        $packageFiles = Get-ChildItem -Path $baseDir -Filter "package.json" -Recurse -Depth 6 -File -ErrorAction SilentlyContinue |
             Where-Object {
-                $fullPath = $_.FullName
-                $fullPath -notmatch '\\node_modules\\' -and
-                $fullPath -notmatch '\\.npm\\' -and
-                $fullPath -notmatch '\\.nvm\\versions\\' -and
-                $fullPath -notmatch '\\Library\\Caches\\' -and
-                $fullPath -notmatch '\\.cache\\' -and
-                $fullPath -notmatch '\\\$Recycle\.Bin\\' -and
-                $fullPath -notmatch '\\.vscode\\' -and
-                $fullPath -notmatch '\\.cursor\\' -and
-                $fullPath -notmatch '\\AppData\\Local\\Application Data\\'
+                $fp = $_.FullName
+                $fp -notmatch '\\node_modules\\' -and
+                $fp -notmatch '\\.npm\\' -and
+                $fp -notmatch '\\.nvm\\' -and
+                $fp -notmatch '\\AppData\\Local\\' -and
+                $fp -notmatch '\\AppData\\Roaming\\' -and
+                $fp -notmatch '\\\$Recycle\.Bin\\' -and
+                $fp -notmatch '\\.vscode\\' -and
+                $fp -notmatch '\\.cursor\\' -and
+                $fp -notmatch '\\temp\\' -and
+                $fp -notmatch '\\tmp\\'
             }
         
         foreach ($pkgFile in $packageFiles) {
-            $projectDir = $pkgFile.DirectoryName
-            $NPM_PROJECTS += $projectDir
+            $NPM_PROJECTS += $pkgFile.DirectoryName
             
             if ($NPM_PROJECTS.Count -ge $MAX_PROJECTS) {
-                Log "Reached project limit ($MAX_PROJECTS)"
+                Write-Log "Reached project limit ($MAX_PROJECTS)"
                 break
             }
         }
-        
-        if ($NPM_PROJECTS.Count -ge $MAX_PROJECTS) {
-            break
-        }
+    } catch {
+        Write-Log "Warning: Error scanning $baseDir"
     }
+    
+    if ($NPM_PROJECTS.Count -ge $MAX_PROJECTS) { break }
 }
 
-Log "Found $($NPM_PROJECTS.Count) npm projects to scan"
+# Remove duplicates
+$NPM_PROJECTS = $NPM_PROJECTS | Select-Object -Unique
+
+Write-Log "Found $($NPM_PROJECTS.Count) npm projects to scan"
 
 ###############################################################################
-# RUN COBENIAN SCANNER
+# SCAN PROJECTS
 ###############################################################################
 
-Log "Step 4: Running Cobenian scanner..."
+Write-Log "Step 4: Scanning projects..."
 
 $HIGH_RISK_COUNT = 0
 $MEDIUM_RISK_COUNT = 0
@@ -369,111 +520,47 @@ $MEDIUM_RISK_DETAILS = ""
 $RAW_OUTPUT = ""
 $OVERALL_STATUS = "clean"
 
-$PROJECT_COUNT = 0
+$projectNum = 0
 
 foreach ($project in $NPM_PROJECTS) {
-    $PROJECT_COUNT++
+    $projectNum++
     
-    if ($PROJECT_COUNT -gt $MAX_PROJECTS) {
+    if ($projectNum -gt $MAX_PROJECTS) {
         $RAW_OUTPUT += "[Stopped at limit] "
         break
     }
     
+    # Truncate path for display
     $displayPath = $project
     if ($project.Length -gt 50) {
         $displayPath = "..." + $project.Substring($project.Length - 47)
     }
     
-    $PROJECT_START = Get-Date
+    $projectStart = Get-Date
     
-    # Run Cobenian detector
-    # Note: The detector script is a bash script, so we need to run it via WSL, Git Bash, or similar
-    # For Windows, we'll try to use Git Bash if available, otherwise we'll need to adapt
-    $SCAN_OUTPUT = ""
-    $EXIT_CODE = 0
+    # Run native scanner
+    $findings = Get-CompromisedPackagesInProject -ProjectPath $project -CompromisedList $CompromisedPackages
     
-    try {
-        # Try to find bash (Git Bash, WSL, or MSYS2)
-        $bashPath = $null
-        $possibleBashPaths = @(
-            "C:\Program Files\Git\bin\bash.exe",
-            "C:\Program Files (x86)\Git\bin\bash.exe",
-            "$env:LOCALAPPDATA\Programs\Git\bin\bash.exe",
-            "bash.exe"  # If in PATH
-        )
-        
-        foreach ($path in $possibleBashPaths) {
-            if (Test-Path $path -ErrorAction SilentlyContinue) {
-                $bashPath = $path
-                break
-            }
-        }
-        
-        if (-not $bashPath) {
-            # Try to find bash in PATH
-            $bashPath = (Get-Command bash -ErrorAction SilentlyContinue).Source
-        }
-        
-        if ($bashPath) {
-            Push-Location $TEMP_DIR
-            $process = Start-Process -FilePath $bashPath -ArgumentList $DETECTOR_SCRIPT, $project -NoNewWindow -Wait -PassThru -RedirectStandardOutput "$TEMP_DIR\scan_output.txt" -RedirectStandardError "$TEMP_DIR\scan_error.txt"
-            $EXIT_CODE = $process.ExitCode
-            $SCAN_OUTPUT = Get-Content "$TEMP_DIR\scan_output.txt" -Raw -ErrorAction SilentlyContinue
-            $SCAN_ERROR = Get-Content "$TEMP_DIR\scan_error.txt" -Raw -ErrorAction SilentlyContinue
-            if ($SCAN_ERROR) {
-                $SCAN_OUTPUT += "`n$SCAN_ERROR"
-            }
-            Pop-Location
-        } else {
-            throw "Bash not found - cannot run detector script"
-        }
-    } catch {
-        $SCAN_OUTPUT = "ERROR: Could not run detector: $_"
-        $EXIT_CODE = 1
-    }
+    $projectEnd = Get-Date
+    $projectDuration = [math]::Round(($projectEnd - $projectStart).TotalSeconds, 1)
     
-    $PROJECT_END = Get-Date
-    $PROJECT_DURATION = ($PROJECT_END - $PROJECT_START).TotalSeconds
-    
-    # Parse output
-    $highInProject = 0
-    $mediumInProject = 0
-    
-    if ($SCAN_OUTPUT -match "HIGH RISK") {
-        $highInProject = ([regex]::Matches($SCAN_OUTPUT, "HIGH RISK")).Count
-    }
-    if ($SCAN_OUTPUT -match "MEDIUM RISK") {
-        $mediumInProject = ([regex]::Matches($SCAN_OUTPUT, "MEDIUM RISK")).Count
-    }
-    
-    # Fallback to exit code
-    if ($EXIT_CODE -eq 1 -and $highInProject -eq 0) {
-        $highInProject = 1
-    }
-    if ($EXIT_CODE -eq 2 -and $mediumInProject -eq 0) {
-        $mediumInProject = 1
-    }
-    
-    $HIGH_RISK_COUNT += $highInProject
-    $MEDIUM_RISK_COUNT += $mediumInProject
+    $highInProject = $findings.Count
     
     if ($highInProject -gt 0) {
         $OVERALL_STATUS = "affected"
-        $highDetail = ($SCAN_OUTPUT | Select-String -Pattern "HIGH RISK" -Context 0,1 | Select-Object -First 3 | ForEach-Object { $_.Line -replace "HIGH RISK", "" -replace "`n", "; " -replace "`r", "" }).Trim() -join "; "
-        if ($highDetail.Length -gt 150) {
-            $highDetail = $highDetail.Substring(0, 150)
+        $HIGH_RISK_COUNT += $highInProject
+        
+        $findingsStr = ($findings | Select-Object -First 5) -join "; "
+        if ($findingsStr.Length -gt 150) {
+            $findingsStr = $findingsStr.Substring(0, 147) + "..."
         }
-        $HIGH_RISK_DETAILS += "$displayPath`: $highDetail | "
-        $RAW_OUTPUT += "[$displayPath] HIGH:$highInProject "
-        Log "  ⚠️  $displayPath`: HIGH RISK"
-    } elseif ($mediumInProject -gt 0) {
-        if ($OVERALL_STATUS -eq "clean") {
-            $OVERALL_STATUS = "warning"
-        }
-        $RAW_OUTPUT += "[$displayPath] MEDIUM:$mediumInProject "
-        Log "  ⚡ $displayPath`: MEDIUM RISK"
+        
+        $HIGH_RISK_DETAILS += "${displayPath}: ${findingsStr} | "
+        $RAW_OUTPUT += "[${displayPath}] COMPROMISED:${highInProject} "
+        Write-Log "  FOUND ${highInProject} compromised: $displayPath"
+        Write-Log "    Packages: $($findings -join ', ')"
     } else {
-        $RAW_OUTPUT += "[$displayPath] clean "
+        $RAW_OUTPUT += "[${displayPath}] clean "
     }
     
     # Brief pause between projects
@@ -485,9 +572,10 @@ if ($NPM_PROJECTS.Count -eq 0) {
     $OVERALL_STATUS = "clean"
 }
 
-# Prepend any warnings to raw output
-if ($WARNINGS) {
-    $RAW_OUTPUT = "[WARNINGS: $WARNINGS] $RAW_OUTPUT"
+# Add warnings to output
+if ($WARNINGS.Count -gt 0) {
+    $warningsStr = $WARNINGS -join "; "
+    $RAW_OUTPUT = "[WARNINGS: $warningsStr] $RAW_OUTPUT"
 }
 
 ###############################################################################
@@ -495,23 +583,20 @@ if ($WARNINGS) {
 ###############################################################################
 
 $END_TIME = Get-Date
-$SCAN_DURATION = [math]::Round((($END_TIME - $START_TIME).TotalMilliseconds))
+$SCAN_DURATION = [math]::Round(($END_TIME - $START_TIME).TotalMilliseconds)
 
-Log "Step 5: Sending results..."
-Log "Status: $OVERALL_STATUS | High: $HIGH_RISK_COUNT | Medium: $MEDIUM_RISK_COUNT | Duration: ${SCAN_DURATION}ms"
+Write-Log "Step 5: Sending results..."
+Write-Log "Status: $OVERALL_STATUS | High: $HIGH_RISK_COUNT | Duration: ${SCAN_DURATION}ms"
 
-# Truncate
+# Truncate fields
 if ($RAW_OUTPUT.Length -gt 5000) {
     $RAW_OUTPUT = $RAW_OUTPUT.Substring(0, 5000)
 }
 if ($HIGH_RISK_DETAILS.Length -gt 1000) {
     $HIGH_RISK_DETAILS = $HIGH_RISK_DETAILS.Substring(0, 1000)
 }
-if ($MEDIUM_RISK_DETAILS.Length -gt 1000) {
-    $MEDIUM_RISK_DETAILS = $MEDIUM_RISK_DETAILS.Substring(0, 1000)
-}
 
-$body = @{
+$resultBody = @{
     secret = $SECRET
     serial = $SERIAL
     hostname = $HOSTNAME
@@ -526,24 +611,26 @@ $body = @{
     scan_duration_ms = $SCAN_DURATION
     scanner_version = $SCANNER_VERSION
     raw_output = $RAW_OUTPUT
-}
+} | ConvertTo-Json -Compress
 
 try {
-    $response = Invoke-RestMethod -Uri $WEBHOOK_URL -Method Post -Body ($body | ConvertTo-Json) -ContentType "application/json" -ErrorAction Stop
-    $HTTP_CODE = 200
+    $response = Invoke-RestMethod -Uri $WEBHOOK_URL -Method Post -Body $resultBody -ContentType "application/json" -TimeoutSec 30
+    Write-Log "Results sent successfully"
 } catch {
-    if ($_.Exception.Response) {
-        $HTTP_CODE = [int]$_.Exception.Response.StatusCode
-    } else {
-        $HTTP_CODE = 0
-    }
+    Write-Log "WARNING: Failed to send results - $_"
 }
 
-if ($HTTP_CODE -eq 200) {
-    Log "✅ Results sent successfully"
+###############################################################################
+# CLEANUP AND EXIT
+###############################################################################
+
+Write-Log "=== Scanner Complete ==="
+
+if ($HIGH_RISK_COUNT -gt 0) {
+    Write-Log "ACTION REQUIRED: Found $HIGH_RISK_COUNT compromised package(s)"
 } else {
-    Log "⚠️  Webhook returned: $HTTP_CODE"
+    Write-Log "No compromised packages found"
 }
 
-Log "=== Scanner Complete ==="
+Remove-LockAndCleanup
 exit 0
