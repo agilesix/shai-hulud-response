@@ -36,7 +36,7 @@ $DELAY_BETWEEN_PROJECTS = 0.2  # Seconds between projects
 $SKIP_IF_ON_BATTERY = $false   # Set to $true to skip when on battery
 
 # Cobenian packages list (we only need this - scanning logic is native PowerShell)
-$PACKAGES_URL = "https://raw.githubusercontent.com/mutsuoara/a6-shai-hulud-response/main/ioc/compromised-packages.txt"
+$PACKAGES_URL = "https://raw.githubusercontent.com/agilesix/shai-hulud-response/main/ioc/compromised-packages.txt"
 
 $SCAN_DIRS = @(
     "C:\Users"

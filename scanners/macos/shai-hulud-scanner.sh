@@ -38,7 +38,7 @@ DELAY_BETWEEN_PROJECTS=0.2
 SKIP_IF_ON_BATTERY=false
 
 # Compromised packages list (plain text, one package:version per line)
-PACKAGES_URL="https://raw.githubusercontent.com/mutsuoara/a6-shai-hulud-response/main/ioc/compromised-packages.txt"
+PACKAGES_URL="https://raw.githubusercontent.com/agilesix/shai-hulud-response/main/ioc/compromised-packages.txt"
 
 SCAN_DIRS=(
   "/Users"

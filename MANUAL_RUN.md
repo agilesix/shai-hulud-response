@@ -22,7 +22,7 @@ This guide explains how to manually run the Shai-Hulud scanners on macOS and Win
 ```bash
 # Clone the repository or download the scanner file
 cd ~/Downloads
-curl -O https://raw.githubusercontent.com/mutsuoara/a6-shai-hulud-response/main/scanners/macos/shai-hulud-scanner.sh
+curl -O https://raw.githubusercontent.com/agilesix/shai-hulud-response/main/scanners/macos/shai-hulud-scanner.sh
 chmod +x shai-hulud-scanner.sh
 ```
 
@@ -37,7 +37,7 @@ chmod +x shai-hulud-scanner.sh
 ```powershell
 # Clone the repository or download the scanner file
 cd $env:USERPROFILE\Downloads
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/mutsuoara/a6-shai-hulud-response/main/scanners/windows/shai-hulud-scanner.ps1" -OutFile "shai-hulud-scanner.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/agilesix/shai-hulud-response/main/scanners/windows/shai-hulud-scanner.ps1" -OutFile "shai-hulud-scanner.ps1"
 ```
 
 Or if you have the repo cloned:
@@ -422,7 +422,7 @@ which zsh
 **Can't download IOC list:**
 ```bash
 # Test connectivity
-curl -I https://raw.githubusercontent.com/mutsuoara/a6-shai-hulud-response/main/ioc/compromised-packages.txt
+curl -I https://raw.githubusercontent.com/agilesix/shai-hulud-response/main/ioc/compromised-packages.txt
 ```
 
 **401 Unauthorized error (Production Mode only):**
@@ -441,7 +441,7 @@ Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
 **Can't download IOC list:**
 ```powershell
 # Test connectivity
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/mutsuoara/a6-shai-hulud-response/main/ioc/compromised-packages.txt" -Method Head
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/agilesix/shai-hulud-response/main/ioc/compromised-packages.txt" -Method Head
 ```
 
 **401 Unauthorized error (Production Mode only):**
