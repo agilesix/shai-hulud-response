@@ -24,7 +24,7 @@ Internal tooling for detecting and responding to the Shai-Hulud npm supply chain
        ▼                   ▼
 ┌─────────────────────────────────┐
 │     Endpoint Scanners           │
-│  (downloads Cobenian detector)  │
+│  (downloads IOC list from repo) │
 └──────────────┬──────────────────┘
                │
                ▼
@@ -46,11 +46,42 @@ See [docs/deployment-guide.md](docs/deployment-guide.md)
 
 ## Scanner Versions
 
-- **v2.0.3** - Current production (self-backgrounding, Cobenian integration, error capture)
+- **v2.0.7** - Current production (November 2025 Shai-Hulud 2.0 coverage, merged IOC list)
+- **v2.0.6** - Native lockfile parsing, removed Bash dependency
+- **v2.0.3** - Self-backgrounding, Cobenian integration, error capture
+
+## IOC Coverage
+
+This scanner detects compromised packages from multiple attack waves:
+
+| Attack Wave | Date | Packages | Source |
+|-------------|------|----------|--------|
+| Chalk/Debug Crypto Theft | September 8, 2025 | ~25 | Cobenian |
+| Shai-Hulud v1 Worm | September 14-16, 2025 | ~550 | Cobenian |
+| Shai-Hulud 2.0 | November 21-24, 2025 | ~900 | Wiz IOC |
+| **Total** | | **~1,509** | Merged |
+
+### High-Impact November 2025 Packages
+
+The November 2025 attack compromised major vendor packages:
+- `@zapier/*` - Official Zapier integration toolkit
+- `@posthog/*` - Analytics platform (130M+ monthly downloads)
+- `@postman/*` - API development tools
+- `@ensdomains/*` - Ethereum .eth domain handling
+- `@asyncapi/*` - API specification tools
+- `@browserbasehq/*` - Browser automation
+
+### Updating IOC List
+
+To add new compromised packages:
+1. Edit `ioc/compromised-packages.txt`
+2. Add entries in format: `package-name:version`
+3. Commit and push - scanners will pick up changes on next run
 
 ## Dependencies
 
-- [Cobenian/shai-hulud-detect](https://github.com/Cobenian/shai-hulud-detect) - Detection signatures (downloaded at runtime)
+- IOC list hosted in this repository: `ioc/compromised-packages.txt`
+- Merged from [Cobenian/shai-hulud-detect](https://github.com/Cobenian/shai-hulud-detect) and [Wiz Security Research IOCs](https://github.com/wiz-sec-public/wiz-research-iocs)
 
 ## Security Notes
 

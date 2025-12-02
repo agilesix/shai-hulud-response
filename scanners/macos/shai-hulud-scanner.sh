@@ -29,7 +29,7 @@
 
 WEBHOOK_URL="https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
 SECRET="YOUR_SHARED_SECRET_HERE"
-SCANNER_VERSION="2.0.6"
+SCANNER_VERSION="2.0.7"
 MAX_PROJECTS=200
 
 # PERFORMANCE SETTINGS
@@ -38,7 +38,7 @@ DELAY_BETWEEN_PROJECTS=0.2
 SKIP_IF_ON_BATTERY=false
 
 # Compromised packages list (plain text, one package:version per line)
-PACKAGES_URL="https://raw.githubusercontent.com/Cobenian/shai-hulud-detect/main/compromised-packages.txt"
+PACKAGES_URL="https://raw.githubusercontent.com/mutsuoara/a6-shai-hulud-response/main/ioc/compromised-packages.txt"
 
 SCAN_DIRS=(
   "/Users"
