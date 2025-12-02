@@ -250,6 +250,8 @@ for base_dir in "${SCAN_DIRS[@]}"; do
       -not -path "*/.vscode/*" \
       -not -path "*/.cursor/*" \
       -not -path "*/Application Support/*" \
+      -not -path "*/test-cases/*" \
+      -not -path "*/*shai-hulud-detect*/*" \
       -print0 2>/dev/null)
   fi
 done

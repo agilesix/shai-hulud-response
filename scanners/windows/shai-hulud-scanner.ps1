@@ -52,16 +52,16 @@ $LOG_FILE = Join-Path $WORK_DIR "scanner.log"
 
 if ($args[0] -eq "--background") {
     $TEMP_DIR = $args[1]
-    # Continue to scanning section below
+  # Continue to scanning section below
 } else {
-    ###########################################################################
+  ###########################################################################
     # FOREGROUND MODE - Launch background and exit immediately
-    ###########################################################################
-    
+  ###########################################################################
+  
     Write-Host "=== Shai-Hulud 2.0 Scanner Launcher v$SCANNER_VERSION ==="
     Write-Host "Timestamp: $((Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'))"
-    
-    # Check for existing run
+  
+  # Check for existing run
     if (Test-Path $LOCK_FILE) {
         $lockContent = Get-Content $LOCK_FILE -ErrorAction SilentlyContinue
         if ($lockContent) {
@@ -69,7 +69,7 @@ if ($args[0] -eq "--background") {
             $existingProcess = Get-Process -Id $existingPid -ErrorAction SilentlyContinue
             if ($existingProcess) {
                 Write-Host "Scanner already running (PID: $existingPid). Exiting."
-                exit 0
+      exit 0
             }
         }
         Remove-Item $LOCK_FILE -Force -ErrorAction SilentlyContinue
@@ -112,7 +112,7 @@ if ($args[0] -eq "--background") {
     }
     
     Write-Host "Launcher exiting."
-    exit 0
+  exit 0
 }
 
 ###############################################################################
@@ -470,7 +470,9 @@ foreach ($baseDir in $SCAN_DIRS) {
                 $fp -notmatch '\\.vscode\\' -and
                 $fp -notmatch '\\.cursor\\' -and
                 $fp -notmatch '\\temp\\' -and
-                $fp -notmatch '\\tmp\\'
+                $fp -notmatch '\\tmp\\' -and
+                $fp -notmatch '\\test-cases\\' -and
+                $fp -notmatch 'shai-hulud-detect'
             }
         
         foreach ($pkgFile in $packageFiles) {
@@ -514,7 +516,7 @@ foreach ($project in $NPM_PROJECTS) {
     
     if ($projectNum -gt $MAX_PROJECTS) {
         $RAW_OUTPUT += "[Stopped at limit] "
-        break
+    break
     }
     
     # Truncate path for display
@@ -549,8 +551,8 @@ foreach ($project in $NPM_PROJECTS) {
     } else {
         $RAW_OUTPUT += "[${displayPath}] clean "
     }
-    
-    # Brief pause between projects
+  
+  # Brief pause between projects
     Start-Sleep -Seconds $DELAY_BETWEEN_PROJECTS
 }
 
