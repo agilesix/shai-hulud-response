@@ -6,6 +6,11 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 
+# Documents
+# Exclude cursor-tasks markdown files from any directory
+**/cursor-tasks*.md
+cursor-tasks*.md
+
 # Diagnostic reports (https://nodejs.org/api/report.html)
 report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 
