@@ -8,12 +8,14 @@ This guide explains how to manually run the Shai-Hulud scanners on macOS and Win
 - macOS 10.15 or later
 - zsh shell (default on macOS Catalina+)
 - `curl` command (pre-installed)
-- Internet connection (to download IOC list)
+- Internet connection (the scanner automatically downloads the IOC list from GitHub - no manual download needed)
 
 ### Windows
 - Windows 10 or later
 - PowerShell 5.1 or later
-- Internet connection (to download IOC list)
+- Internet connection (the scanner automatically downloads the IOC list from GitHub - no manual download needed)
+
+**Note:** You do NOT need to manually download the `compromised-packages.txt` file. The scanner automatically downloads it from the public GitHub repository (`https://raw.githubusercontent.com/agilesix/shai-hulud-response/main/ioc/compromised-packages.txt`) during execution.
 
 ## Step 1: Download the Scanner
 
@@ -95,7 +97,7 @@ Replace `YOUR_SHARED_SECRET_HERE` with the actual secret from 1Password (vault: 
 
 The scanner will:
 - Launch in background automatically
-- Download the IOC list from GitHub
+- Automatically download the IOC list from the public GitHub repo
 - Scan all npm projects under `/Users`
 - Send results to the webhook
 - Log output to `/var/tmp/shai-hulud/scanner.log`
@@ -138,7 +140,7 @@ Replace `YOUR_SHARED_SECRET_HERE` with the actual secret from 1Password (vault: 
 
 The scanner will:
 - Launch in background automatically
-- Download the IOC list from GitHub
+- Automatically download the IOC list from the public GitHub repo
 - Scan all npm projects under `C:\Users`
 - Send results to the webhook
 - Log output to `%TEMP%\shai-hulud\scanner.log`
@@ -534,5 +536,5 @@ You can modify these variables in the scanner files:
 - Results are sent to the webhook asynchronously (Production Mode only)
 - The scanner uses reduced CPU priority to avoid impacting system performance
 - Test-case directories are automatically excluded from scanning
-- The IOC list is downloaded fresh on each run from GitHub
+- **The IOC list (`compromised-packages.txt`) is automatically downloaded from the public GitHub repo on each run - no manual download needed**
 - Local Testing Mode doesn't require any secrets or webhook configuration
