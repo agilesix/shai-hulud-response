@@ -1,21 +1,26 @@
 #!/bin/zsh
 
 ###############################################################################
-# SHAI-HULUD 2.0 SCANNER - SELF-BACKGROUNDING (ALL-IN-ONE)
-# Version: 2.0.5
+# SHAI-HULUD 2.0 SCANNER - NATIVE ZSH VERSION
+# Version: 2.0.6
 # 
-# This single script handles everything:
+# This script handles everything:
 # 1. When run by Kandji, it copies itself and launches in background
 # 2. The backgrounded copy does the actual scanning
 # 3. Results are sent to webhook when complete
 #
 # Features:
+# - No Bash 5 dependency: Native zsh lockfile parsing
 # - No timeout: Backgrounds itself so Kandji exits immediately
-# - Version-aware: Uses Cobenian detector for accurate detection
+# - Version-aware: Checks exact package:version against compromised list
 # - Performance-friendly: Runs at reduced priority
 # - Error capture: Reports environment issues to Google Sheets
 #
-# No need to host separate files - just deploy this one script to Kandji.
+# Changes in v2.0.6:
+# - Removed dependency on Cobenian shai-hulud-detector.sh (requires Bash 5)
+# - Native zsh parsing of package-lock.json (lockfileVersion 2 and 3)
+# - Direct version matching against compromised-packages.txt
+# - Fixed double-fork daemonization for MDM compatibility
 ###############################################################################
 
 ###############################################################################
@@ -23,18 +28,16 @@
 ###############################################################################
 
 WEBHOOK_URL="https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
-SECRET='X$GMLOSnkrIyWbG#yFn%Izyj%5FR9r%AOo%lGKXr'
-SCANNER_VERSION="2.0.5"
+SECRET="YOUR_SHARED_SECRET_HERE"
+SCANNER_VERSION="2.0.6"
 MAX_PROJECTS=200
 
 # PERFORMANCE SETTINGS
-# Balanced settings - runs efficiently without hogging resources
-NICE_LEVEL=10              # Moderate-low priority (0=normal, 19=lowest)
-DELAY_BETWEEN_PROJECTS=0.2 # Brief pause to prevent sustained 100% CPU
-SKIP_IF_ON_BATTERY=false   # Set to true to skip scan when on battery
+NICE_LEVEL=10
+DELAY_BETWEEN_PROJECTS=0.2
+SKIP_IF_ON_BATTERY=false
 
-# Cobenian scanner URLs (does proper version checking)
-DETECTOR_URL="https://raw.githubusercontent.com/Cobenian/shai-hulud-detect/main/shai-hulud-detector.sh"
+# Compromised packages list (plain text, one package:version per line)
 PACKAGES_URL="https://raw.githubusercontent.com/Cobenian/shai-hulud-detect/main/compromised-packages.txt"
 
 SCAN_DIRS=(
@@ -50,11 +53,8 @@ LOG_FILE="${WORK_DIR}/scanner.log"
 ###############################################################################
 
 if [[ "$1" == "--background" ]]; then
-  # We ARE the background process - do the actual scanning
   shift
   TEMP_DIR="$1"
-  
-  # Continue to scanning section below
 else
   ###########################################################################
   # FOREGROUND MODE - Launch background and exit
@@ -85,28 +85,22 @@ else
   
   echo "Launching scanner in background..."
   
-  # Double-fork to fully daemonize (survives parent exit)
-  # First fork creates child, second fork creates orphaned grandchild
-  # This is the classic Unix daemonization pattern
+  # Double-fork daemonization (works in MDM environments without controlling terminal)
   ( ( /bin/zsh "${SCRIPT_COPY}" --background "${TEMP_DIR}" >> "${LOG_FILE}" 2>&1 ) & )
   
   # Give it a moment to start
-  sleep 2
+  sleep 1
   
-  # Check if process is running
-  SCANNER_PID=$(pgrep -f "shai-hulud.*--background" 2>/dev/null | head -1)
-  if [[ -n "$SCANNER_PID" ]]; then
-    echo "$SCANNER_PID" > "$LOCK_FILE"
-    echo "✅ Scanner launched (PID: $SCANNER_PID)"
+  # Try to find the backgrounded process
+  BG_PID=$(pgrep -f "scanner.sh --background" 2>/dev/null | tail -1)
+  
+  if [[ -n "$BG_PID" ]]; then
+    echo "$BG_PID" > "$LOCK_FILE"
+    echo "✅ Scanner launched (PID: $BG_PID)"
     echo "Log: ${LOG_FILE}"
     echo "Results will be sent to webhook when complete."
   else
-    # Check if it already completed (fast scan)
-    if [[ -f "${LOG_FILE}" ]] && grep -q "Scanner Complete" "${LOG_FILE}" 2>/dev/null; then
-      echo "✅ Scanner already completed (fast run)"
-    else
-      echo "⚠️  Scanner may have exited - check ${LOG_FILE}"
-    fi
+    echo "⚠️  Scanner may have exited - check ${LOG_FILE}"
   fi
   
   echo "Launcher exiting."
@@ -150,28 +144,15 @@ if [[ "$POWER_SOURCE" == *"Battery"* ]]; then
   log "INFO: Running on battery power"
 fi
 
-# Check if screen is locked or display is off
-DISPLAY_STATE=$(ioreg -n IODisplayWrangler 2>/dev/null | grep -i "currentpowerstate" | head -1 | awk '{print $NF}')
-if [[ "$DISPLAY_STATE" == "0" ]]; then
-  WARNINGS="${WARNINGS}Display is off/sleeping; "
-  log "INFO: Display appears to be off or sleeping"
-fi
-
-# Check macOS version for compatibility logging
+# Check macOS version
 MACOS_VERSION=$(sw_vers -productVersion 2>/dev/null || echo "Unknown")
 log "INFO: macOS version: ${MACOS_VERSION}"
 
-# Check available disk space (warn if < 1GB)
+# Check available disk space
 AVAILABLE_SPACE_KB=$(df -k /var/tmp 2>/dev/null | tail -1 | awk '{print $4}')
 if [[ -n "$AVAILABLE_SPACE_KB" && "$AVAILABLE_SPACE_KB" -lt 1048576 ]]; then
   WARNINGS="${WARNINGS}Low disk space (<1GB); "
   log "WARNING: Low disk space on /var/tmp"
-fi
-
-# Check network connectivity to GitHub
-if ! curl -s --connect-timeout 5 -o /dev/null "https://github.com"; then
-  log "ERROR: Cannot reach github.com - network may be unavailable"
-  # Still try to continue, will fail at download step with proper error
 fi
 
 ###############################################################################
@@ -190,7 +171,7 @@ if [[ "$SKIP_IF_ON_BATTERY" == "true" ]]; then
   fi
 fi
 
-# Lower our CPU priority slightly so we don't compete with user apps
+# Lower CPU priority
 renice ${NICE_LEVEL} $$ >/dev/null 2>&1 || true
 
 ###############################################################################
@@ -202,18 +183,16 @@ log "Step 1: Gathering device info..."
 CURRENT_USER=$(/usr/bin/stat -f%Su /dev/console)
 SERIAL=$(/usr/sbin/ioreg -l | /usr/bin/awk -F\" '/IOPlatformSerialNumber/ { print $4 }')
 HOSTNAME=$(/usr/sbin/scutil --get ComputerName 2>/dev/null || hostname)
-TIMESTAMP_UTC=$(/bin/date -u +"%Y-%m-%dT%H:%M:%SZ")
 START_TIME=$(date +%s)
 
 log "Host: ${HOSTNAME} | Serial: ${SERIAL} | User: ${CURRENT_USER}"
 
 ###############################################################################
-# DOWNLOAD COBENIAN SCANNER
+# DOWNLOAD COMPROMISED PACKAGES LIST
 ###############################################################################
 
-log "Step 2: Downloading Cobenian scanner..."
+log "Step 2: Downloading compromised packages list..."
 
-DETECTOR_SCRIPT="${TEMP_DIR}/shai-hulud-detector.sh"
 PACKAGES_FILE="${TEMP_DIR}/compromised-packages.txt"
 
 send_error() {
@@ -224,20 +203,25 @@ send_error() {
     "${WEBHOOK_URL}"
 }
 
-if ! curl -fsSL --connect-timeout 30 --max-time 60 "${DETECTOR_URL}" -o "${DETECTOR_SCRIPT}" 2>&1; then
-  send_error "Failed to download Cobenian detector script"
-  exit 1
-fi
-
 if ! curl -fsSL --connect-timeout 30 --max-time 60 "${PACKAGES_URL}" -o "${PACKAGES_FILE}" 2>&1; then
   send_error "Failed to download compromised packages list"
   exit 1
 fi
 
-chmod +x "${DETECTOR_SCRIPT}"
+# Build associative array of compromised packages for O(1) lookup
+typeset -A COMPROMISED
+while IFS= read -r line; do
+  # Skip comments and empty lines
+  [[ "$line" =~ ^[[:space:]]*# ]] && continue
+  [[ -z "${line// }" ]] && continue
+  # Trim whitespace
+  line="${line## }"
+  line="${line%% }"
+  [[ -n "$line" ]] && COMPROMISED[$line]=1
+done < "${PACKAGES_FILE}"
 
-PACKAGE_COUNT=$(grep -v '^#' "${PACKAGES_FILE}" | grep -v '^$' | wc -l | tr -d ' ')
-log "Downloaded detector + ${PACKAGE_COUNT} compromised package signatures"
+PACKAGE_COUNT=${#COMPROMISED[@]}
+log "Loaded ${PACKAGE_COUNT} compromised package signatures"
 
 ###############################################################################
 # FIND NPM PROJECTS
@@ -273,10 +257,112 @@ done
 log "Found ${#NPM_PROJECTS[@]} npm projects to scan"
 
 ###############################################################################
-# RUN COBENIAN SCANNER
+# FUNCTION: Parse package-lock.json and check for compromised packages
 ###############################################################################
 
-log "Step 4: Running Cobenian scanner..."
+check_lockfile() {
+  local lockfile="$1"
+  local findings=()
+  
+  [[ ! -f "$lockfile" ]] && return
+  
+  # Detect lockfile version
+  local lockfile_version=$(grep -o '"lockfileVersion"[[:space:]]*:[[:space:]]*[0-9]*' "$lockfile" | grep -o '[0-9]*' | head -1)
+  
+  if [[ "$lockfile_version" == "2" || "$lockfile_version" == "3" ]]; then
+    # lockfileVersion 2 or 3: packages are in "packages" object
+    # Format: "node_modules/package-name": { "version": "x.y.z" }
+    
+    # Extract package paths and versions using awk
+    while IFS='|' read -r pkg_path version; do
+      [[ -z "$pkg_path" || -z "$version" ]] && continue
+      
+      # Extract package name from path (e.g., "node_modules/@scope/pkg" -> "@scope/pkg")
+      local pkg_name=""
+      if [[ "$pkg_path" =~ node_modules/(.+) ]]; then
+        pkg_name="${match[1]}"
+      else
+        continue
+      fi
+      
+      # Check if this package:version is compromised
+      local check_key="${pkg_name}:${version}"
+      if [[ -n "${COMPROMISED[$check_key]}" ]]; then
+        findings+=("${pkg_name}@${version}")
+      fi
+    done < <(awk '
+      BEGIN { in_packages = 0; current_pkg = ""; }
+      /"packages"[[:space:]]*:[[:space:]]*\{/ { in_packages = 1; next }
+      in_packages && /^[[:space:]]*"node_modules\/[^"]+":/ {
+        match($0, /"node_modules\/[^"]+"/);
+        current_pkg = substr($0, RSTART+1, RLENGTH-2);
+      }
+      in_packages && current_pkg != "" && /"version"[[:space:]]*:/ {
+        match($0, /"version"[[:space:]]*:[[:space:]]*"[^"]+"/);
+        version_part = substr($0, RSTART, RLENGTH);
+        match(version_part, /:[[:space:]]*"[^"]+"/);
+        version = substr(version_part, RSTART+2, RLENGTH-3);
+        gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", version);
+        if (current_pkg != "" && version != "") {
+          print current_pkg "|" version;
+        }
+        current_pkg = "";
+      }
+    ' "$lockfile" 2>/dev/null)
+    
+  elif [[ "$lockfile_version" == "1" || -z "$lockfile_version" ]]; then
+    # lockfileVersion 1: packages are in "dependencies" object (older format)
+    # Format: "package-name": { "version": "x.y.z" }
+    
+    while IFS='|' read -r pkg_name version; do
+      [[ -z "$pkg_name" || -z "$version" ]] && continue
+      
+      local check_key="${pkg_name}:${version}"
+      if [[ -n "${COMPROMISED[$check_key]}" ]]; then
+        findings+=("${pkg_name}@${version}")
+      fi
+    done < <(awk '
+      BEGIN { in_deps = 0; current_pkg = ""; brace_count = 0; }
+      /"dependencies"[[:space:]]*:[[:space:]]*\{/ { in_deps = 1; brace_count = 1; next }
+      in_deps {
+        # Track brace depth
+        gsub(/[^{}]/, "");
+        for (i = 1; i <= length($0); i++) {
+          c = substr($0, i, 1);
+          if (c == "{") brace_count++;
+          else if (c == "}") brace_count--;
+        }
+        if (brace_count <= 0) { in_deps = 0; next; }
+      }
+      in_deps && /"[^"]+":.*\{/ && !/"dependencies":/ && !/"requires":/ && !/"dev":/ {
+        match($0, /"[^"]+"/);
+        current_pkg = substr($0, RSTART+1, RLENGTH-2);
+      }
+      in_deps && current_pkg != "" && /"version"[[:space:]]*:/ {
+        match($0, /"version"[[:space:]]*:[[:space:]]*"[^"]+"/);
+        version_part = substr($0, RSTART, RLENGTH);
+        match(version_part, /:[[:space:]]*"[^"]+"/);
+        version = substr(version_part, RSTART+2, RLENGTH-3);
+        gsub(/^[[:space:]"]+|[[:space:]"]+$/, "", version);
+        if (current_pkg != "" && version != "") {
+          print current_pkg "|" version;
+        }
+        current_pkg = "";
+      }
+    ' "$lockfile" 2>/dev/null)
+  fi
+  
+  # Return findings
+  if [[ ${#findings[@]} -gt 0 ]]; then
+    printf '%s\n' "${findings[@]}"
+  fi
+}
+
+###############################################################################
+# SCAN PROJECTS
+###############################################################################
+
+log "Step 4: Scanning projects for compromised packages..."
 
 HIGH_RISK_COUNT=0
 MEDIUM_RISK_COUNT=0
@@ -299,44 +385,35 @@ for project in "${NPM_PROJECTS[@]}"; do
   display_path="${project}"
   [[ ${#project} -gt 50 ]] && display_path="...${project: -47}"
   
-  PROJECT_START=$(date +%s)
+  # Check for lockfile
+  LOCKFILE=""
+  if [[ -f "${project}/package-lock.json" ]]; then
+    LOCKFILE="${project}/package-lock.json"
+  elif [[ -f "${project}/npm-shrinkwrap.json" ]]; then
+    LOCKFILE="${project}/npm-shrinkwrap.json"
+  fi
   
-  # Run Cobenian detector
-  cd "${TEMP_DIR}"
-  SCAN_OUTPUT=$("${DETECTOR_SCRIPT}" "$project" 2>&1) || true
-  EXIT_CODE=$?
-  
-  PROJECT_END=$(date +%s)
-  PROJECT_DURATION=$((PROJECT_END - PROJECT_START))
-  
-  # Parse output
   high_in_project=0
-  medium_in_project=0
+  project_findings=""
   
-  if echo "$SCAN_OUTPUT" | grep -q "HIGH RISK"; then
-    high_in_project=$(echo "$SCAN_OUTPUT" | grep -c "HIGH RISK" 2>/dev/null || echo 0)
+  if [[ -n "$LOCKFILE" ]]; then
+    # Get findings from lockfile
+    findings_output=$(check_lockfile "$LOCKFILE")
+    
+    if [[ -n "$findings_output" ]]; then
+      # Count findings
+      high_in_project=$(echo "$findings_output" | wc -l | tr -d ' ')
+      project_findings=$(echo "$findings_output" | tr '\n' ', ' | sed 's/,$//')
+    fi
   fi
-  if echo "$SCAN_OUTPUT" | grep -q "MEDIUM RISK"; then
-    medium_in_project=$(echo "$SCAN_OUTPUT" | grep -c "MEDIUM RISK" 2>/dev/null || echo 0)
-  fi
-  
-  # Fallback to exit code
-  [[ $EXIT_CODE -eq 1 && $high_in_project -eq 0 ]] && high_in_project=1
-  [[ $EXIT_CODE -eq 2 && $medium_in_project -eq 0 ]] && medium_in_project=1
   
   HIGH_RISK_COUNT=$((HIGH_RISK_COUNT + high_in_project))
-  MEDIUM_RISK_COUNT=$((MEDIUM_RISK_COUNT + medium_in_project))
   
   if [[ $high_in_project -gt 0 ]]; then
     OVERALL_STATUS="affected"
-    high_detail=$(echo "$SCAN_OUTPUT" | grep -A1 "HIGH RISK" | grep -v "HIGH RISK" | head -3 | tr '\n' '; ' | tr -cd '[:print:]' | cut -c1-150)
-    HIGH_RISK_DETAILS="${HIGH_RISK_DETAILS}${display_path}: ${high_detail} | "
+    HIGH_RISK_DETAILS="${HIGH_RISK_DETAILS}${display_path}: ${project_findings} | "
     RAW_OUTPUT="${RAW_OUTPUT}[${display_path}] HIGH:${high_in_project} "
-    log "  ⚠️  ${display_path}: HIGH RISK"
-  elif [[ $medium_in_project -gt 0 ]]; then
-    [[ "$OVERALL_STATUS" == "clean" ]] && OVERALL_STATUS="warning"
-    RAW_OUTPUT="${RAW_OUTPUT}[${display_path}] MEDIUM:${medium_in_project} "
-    log "  ⚡ ${display_path}: MEDIUM RISK"
+    log "  ⚠️  ${display_path}: HIGH RISK (${project_findings})"
   else
     RAW_OUTPUT="${RAW_OUTPUT}[${display_path}] clean "
   fi
@@ -362,49 +439,29 @@ SCAN_DURATION=$(( (END_TIME - START_TIME) * 1000 ))
 log "Step 5: Sending results..."
 log "Status: ${OVERALL_STATUS} | High: ${HIGH_RISK_COUNT} | Medium: ${MEDIUM_RISK_COUNT} | Duration: ${SCAN_DURATION}ms"
 
-# Truncate
+# Truncate for webhook
 RAW_OUTPUT="${RAW_OUTPUT:0:5000}"
 HIGH_RISK_DETAILS="${HIGH_RISK_DETAILS:0:1000}"
 MEDIUM_RISK_DETAILS="${MEDIUM_RISK_DETAILS:0:1000}"
 
-HTTP_CODE=$(python3 << PYTHON_SCRIPT
-import json
-import urllib.request
-import urllib.error
-
-data = {
-    "secret": """${SECRET}""",
-    "serial": """${SERIAL}""",
-    "hostname": """${HOSTNAME}""",
-    "user": """${CURRENT_USER}""",
-    "os": "macOS",
-    "status": """${OVERALL_STATUS}""",
-    "high_risk_count": ${HIGH_RISK_COUNT},
-    "medium_risk_count": ${MEDIUM_RISK_COUNT},
-    "low_risk_count": ${LOW_RISK_COUNT},
-    "high_risk_details": """${HIGH_RISK_DETAILS}""",
-    "medium_risk_details": """${MEDIUM_RISK_DETAILS}""",
-    "scan_duration_ms": ${SCAN_DURATION},
-    "scanner_version": """${SCANNER_VERSION}""",
-    "raw_output": """${RAW_OUTPUT}"""
+# Escape special characters for JSON
+escape_json() {
+  local str="$1"
+  str="${str//\\/\\\\}"
+  str="${str//\"/\\\"}"
+  str="${str//$'\n'/\\n}"
+  str="${str//$'\r'/\\r}"
+  str="${str//$'\t'/\\t}"
+  echo "$str"
 }
 
-req = urllib.request.Request(
-    "${WEBHOOK_URL}",
-    data=json.dumps(data).encode('utf-8'),
-    headers={"Content-Type": "application/json"},
-    method="POST"
-)
+RAW_OUTPUT_ESCAPED=$(escape_json "$RAW_OUTPUT")
+HIGH_RISK_DETAILS_ESCAPED=$(escape_json "$HIGH_RISK_DETAILS")
+MEDIUM_RISK_DETAILS_ESCAPED=$(escape_json "$MEDIUM_RISK_DETAILS")
 
-try:
-    with urllib.request.urlopen(req, timeout=30) as response:
-        print(response.status)
-except urllib.error.HTTPError as e:
-    print(e.code)
-except Exception as e:
-    print("0")
-PYTHON_SCRIPT
-)
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
+  -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"${OVERALL_STATUS}\", \"high_risk_count\": ${HIGH_RISK_COUNT}, \"medium_risk_count\": ${MEDIUM_RISK_COUNT}, \"low_risk_count\": ${LOW_RISK_COUNT}, \"high_risk_details\": \"${HIGH_RISK_DETAILS_ESCAPED}\", \"medium_risk_details\": \"${MEDIUM_RISK_DETAILS_ESCAPED}\", \"scan_duration_ms\": ${SCAN_DURATION}, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${RAW_OUTPUT_ESCAPED}\"}" \
+  "${WEBHOOK_URL}" 2>/dev/null)
 
 if [[ "${HTTP_CODE}" == "200" ]]; then
   log "✅ Results sent successfully"
