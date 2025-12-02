@@ -6,9 +6,10 @@ compatibility_date = "2024-01-01"
 # These are stored in Cloudflare and not in this file for security
 # - SHARED_SECRET: Secret key for authenticating webhook requests
 # - GOOGLE_SERVICE_ACCOUNT_JSON: JSON credentials for Google Sheets API access
+# - GOOGLE_SHEET_ID: Google Sheets spreadsheet ID (moved to secret for security)
 
 [vars]
-GOOGLE_SHEET_ID = "1k0eJucPmefZDRWCWmrdc20fr8j8NN5u3oTK-8uHH6kQ"
+# SHEET_NAME can remain public as it's just a sheet tab name
 SHEET_NAME = "Acknowledgements"
 
 [observability]
