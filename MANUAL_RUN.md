@@ -2,6 +2,12 @@
 
 This guide explains how to manually run the Shai-Hulud scanners on macOS and Windows for testing or one-off scans.
 
+## Quick Start
+
+**Running locally?** You don't need the webhook secret! If you want to run the scanner locally for testing without sending results to Google Sheets, see the [Local Testing Mode](#local-testing-mode-no-webhookgoogle-sheets) section below. This mode outputs results directly to the console and doesn't require any secrets or webhook configuration.
+
+**Running in production?** You'll need to configure the `SECRET` variable with the actual secret from 1Password (vault: "Shai-Hulud Scanner") to authenticate with the webhook.
+
 ## Prerequisites
 
 ### macOS
@@ -172,7 +178,31 @@ nano shai-hulud-scanner.sh
 vim shai-hulud-scanner.sh
 ```
 
-2. **Find the "SEND RESULTS" section** (around line 432) and replace the webhook submission with console output:
+2. **Modify the `send_error()` function** (around line 198) to output to console instead of webhook:
+
+**Find this function:**
+```bash
+send_error() {
+  local msg="$1"
+  log "ERROR: $msg"
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"error\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${msg}\"}" \
+    "${WEBHOOK_URL}"
+}
+```
+
+**Replace with:**
+```bash
+send_error() {
+  local msg="$1"
+  log "ERROR: $msg"
+  echo ""
+  echo "❌ ERROR (Local Testing Mode): $msg" >&2
+  echo "This error would normally be sent to the webhook." >&2
+}
+```
+
+3. **Find the "SEND RESULTS" section** (around line 432) and replace the webhook submission with console output:
 
 **Find this block:**
 ```bash
@@ -220,7 +250,7 @@ echo "=========================================="
 log "✅ Results displayed in console (local testing mode)"
 ```
 
-3. **Run the scanner:**
+4. **Run the scanner:**
 ```bash
 ./shai-hulud-scanner.sh --background /var/tmp/shai-hulud/scan-test
 ```
@@ -231,7 +261,51 @@ Or to see output immediately, you can also modify the script to skip the backgro
 
 1. **Open the scanner file** in a text editor (Notepad, VS Code, etc.)
 
-2. **Find the "SEND RESULTS" section** (around line 568) and replace the webhook submission with console output:
+2. **Modify the `Send-ErrorReport()` function** (around line 281) to output to console instead of webhook:
+
+**Find this function:**
+```powershell
+function Send-ErrorReport {
+    param([string]$Message)
+    Write-Log "ERROR: $Message"
+    
+    $errorBody = @{
+        secret = $SECRET
+        serial = $SERIAL
+        hostname = $HOSTNAME
+        user = $CURRENT_USER
+        os = "Windows"
+        status = "error"
+        high_risk_count = 0
+        medium_risk_count = 0
+        low_risk_count = 0
+        high_risk_details = ""
+        medium_risk_details = ""
+        scan_duration_ms = 0
+        scanner_version = $SCANNER_VERSION
+        raw_output = $Message
+    } | ConvertTo-Json -Compress
+    
+    try {
+        Invoke-RestMethod -Uri $WEBHOOK_URL -Method Post -Body $errorBody -ContentType "application/json" -TimeoutSec 30 | Out-Null
+    } catch {
+        Write-Log "Failed to send error report"
+    }
+}
+```
+
+**Replace with:**
+```powershell
+function Send-ErrorReport {
+    param([string]$Message)
+    Write-Log "ERROR: $Message"
+    Write-Host ""
+    Write-Host "❌ ERROR (Local Testing Mode): $Message" -ForegroundColor Red
+    Write-Host "This error would normally be sent to the webhook." -ForegroundColor Yellow
+}
+```
+
+3. **Find the "SEND RESULTS" section** (around line 568) and replace the webhook submission with console output:
 
 **Find this block:**
 ```powershell
@@ -276,7 +350,7 @@ Write-Host "==========================================" -ForegroundColor Cyan
 Write-Log "✅ Results displayed in console (local testing mode)"
 ```
 
-3. **Run the scanner:**
+4. **Run the scanner:**
 ```powershell
 .\shai-hulud-scanner.ps1 --background "$env:TEMP\shai-hulud\scan-test"
 ```
