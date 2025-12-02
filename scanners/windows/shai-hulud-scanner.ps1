@@ -16,7 +16,7 @@
     - Error capture: Reports environment issues to Google Sheets
     
 .VERSION
-    2.0.6
+    2.0.7
     
 .NOTES
     Deploy via Action1 MDM. Results sent to webhook -> Google Sheets.
