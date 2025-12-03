@@ -14,9 +14,10 @@
     - Version-aware: Checks exact package:version pairs (no false positives)
     - Performance-friendly: Runs at reduced priority
     - Error capture: Reports environment issues to Google Sheets
+    - Malicious file detection: Detects files dropped by Shai-Hulud 2.0 payloads
     
 .VERSION
-    2.0.7
+    2.0.8
     
 .NOTES
     Deploy via Action1 MDM. Results sent to webhook -> Google Sheets.
@@ -28,8 +29,15 @@
 
 $WEBHOOK_URL = "https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
 $SECRET = "YOUR_SHARED_SECRET_HERE"
-$SCANNER_VERSION = "2.0.7"
+$SCANNER_VERSION = "2.0.8"
 $MAX_PROJECTS = 200
+
+# Malicious files dropped by Shai-Hulud 2.0
+$MALICIOUS_FILES = @(
+    "setup_bun.js",
+    "bun_environment.js",
+    "actionsSecrets.json"
+)
 
 # PERFORMANCE SETTINGS
 $DELAY_BETWEEN_PROJECTS = 0.2  # Seconds between projects
@@ -52,6 +60,18 @@ $LOG_FILE = Join-Path $WORK_DIR "scanner.log"
 
 if ($args[0] -eq "--background") {
     $TEMP_DIR = $args[1]
+    # Ensure TEMP_DIR and WORK_DIR exist and are writable
+    if (-not (Test-Path $TEMP_DIR)) {
+        New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+    }
+    if (-not (Test-Path $TEMP_DIR)) {
+        Write-Host "ERROR: Cannot create temp directory: $TEMP_DIR" -ForegroundColor Red
+        exit 1
+    }
+    # Ensure WORK_DIR exists for log file
+    if (-not (Test-Path $WORK_DIR)) {
+        New-Item -ItemType Directory -Path $WORK_DIR -Force | Out-Null
+    }
   # Continue to scanning section below
 } else {
   ###########################################################################
@@ -224,6 +244,7 @@ if ($SKIP_IF_ON_BATTERY) {
                 scan_duration_ms = 0
                 scanner_version = $SCANNER_VERSION
                 raw_output = "Skipped - on battery power"
+                malicious_files_found = 0
             } | ConvertTo-Json -Compress
             
             try {
@@ -276,6 +297,16 @@ Write-Log "Host: $HOSTNAME | Serial: $SERIAL | User: $CURRENT_USER"
 
 Write-Log "Step 2: Downloading compromised packages list..."
 
+# Ensure TEMP_DIR exists and is writable
+if (-not (Test-Path $TEMP_DIR)) {
+    New-Item -ItemType Directory -Path $TEMP_DIR -Force | Out-Null
+}
+if (-not (Test-Path $TEMP_DIR)) {
+    Send-ErrorReport "Cannot create temp directory: $TEMP_DIR"
+    Remove-LockAndCleanup
+    exit 1
+}
+
 $PACKAGES_FILE = Join-Path $TEMP_DIR "compromised-packages.txt"
 
 function Send-ErrorReport {
@@ -297,6 +328,7 @@ function Send-ErrorReport {
         scan_duration_ms = 0
         scanner_version = $SCANNER_VERSION
         raw_output = $Message
+        malicious_files_found = 0
     } | ConvertTo-Json -Compress
     
     try {
@@ -447,6 +479,69 @@ function Get-CompromisedPackagesInProject {
 }
 
 ###############################################################################
+# MALICIOUS FILE DETECTION
+# Detects files dropped by Shai-Hulud 2.0 payload execution
+###############################################################################
+
+function Scan-MaliciousFiles {
+    param([string]$ScanDir)
+    
+    $foundFiles = @()
+    
+    Write-Log "Scanning for malicious files..."
+    
+    # Check for known malicious files
+    foreach ($filename in $MALICIOUS_FILES) {
+        $files = Get-ChildItem -Path $ScanDir -Filter $filename -Recurse -ErrorAction SilentlyContinue |
+                 Where-Object { 
+                     $fp = $_.FullName
+                     $fp -notlike "*\node_modules\*" -and
+                     $fp -notlike "*\test-cases\*" -and
+                     $fp -notlike "*\shai-hulud-detect*"
+                 }
+        
+        foreach ($file in $files) {
+            $foundFiles += $file.FullName
+            Write-Log "  ⚠️  CRITICAL: Found malicious file: $($file.FullName)"
+        }
+    }
+    
+    # Check for malicious GitHub workflow files
+    $workflowDir = Join-Path $ScanDir ".github\workflows"
+    if (Test-Path $workflowDir) {
+        # Check for formatter_*.yml files
+        $formatterFiles = Get-ChildItem -Path $workflowDir -Filter "formatter_*.yml" -ErrorAction SilentlyContinue
+        foreach ($file in $formatterFiles) {
+            $foundFiles += $file.FullName
+            Write-Log "  ⚠️  CRITICAL: Found suspicious workflow: $($file.FullName)"
+        }
+        
+        # Check for SHA1HULUD references
+        $ymlFiles = Get-ChildItem -Path $workflowDir -Filter "*.yml" -ErrorAction SilentlyContinue
+        foreach ($file in $ymlFiles) {
+            $content = Get-Content $file.FullName -Raw -ErrorAction SilentlyContinue
+            if ($content -match "SHA1HULUD") {
+                $foundFiles += $file.FullName
+                Write-Log "  ⚠️  CRITICAL: Found SHA1HULUD reference in: $($file.FullName)"
+            }
+            if ($content -match "on:\s*discussion") {
+                $foundFiles += $file.FullName
+                Write-Log "  ⚠️  WARNING: Found discussion trigger backdoor in: $($file.FullName)"
+            }
+        }
+    }
+    
+    # Check for .dev-env directory (rogue runner)
+    $devEnvDir = Join-Path $env:USERPROFILE ".dev-env"
+    if (Test-Path $devEnvDir) {
+        $foundFiles += $devEnvDir
+        Write-Log "  ⚠️  CRITICAL: Found rogue runner directory: $devEnvDir"
+    }
+    
+    return $foundFiles.Count
+}
+
+###############################################################################
 # FIND NPM PROJECTS
 ###############################################################################
 
@@ -508,6 +603,7 @@ $HIGH_RISK_DETAILS = ""
 $MEDIUM_RISK_DETAILS = ""
 $RAW_OUTPUT = ""
 $OVERALL_STATUS = "clean"
+$MALICIOUS_FILE_COUNT = 0
 
 $projectNum = 0
 
@@ -567,6 +663,23 @@ if ($WARNINGS.Count -gt 0) {
     $RAW_OUTPUT = "[WARNINGS: $warningsStr] $RAW_OUTPUT"
 }
 
+# Scan for malicious files
+$MALICIOUS_FILE_COUNT = Scan-MaliciousFiles -ScanDir $env:USERPROFILE
+
+# Ensure MALICIOUS_FILE_COUNT is always a number (default to 0 if not)
+if (-not $MALICIOUS_FILE_COUNT -or $MALICIOUS_FILE_COUNT -notmatch '^\d+$') {
+    $MALICIOUS_FILE_COUNT = 0
+}
+
+if ($MALICIOUS_FILE_COUNT -gt 0) {
+    Write-Log "⚠️  CRITICAL: Found $MALICIOUS_FILE_COUNT malicious files/directories!"
+    $HIGH_RISK_COUNT += $MALICIOUS_FILE_COUNT
+    $HIGH_RISK_DETAILS += "MALICIOUS_FILES:$MALICIOUS_FILE_COUNT;"
+    $OVERALL_STATUS = "affected"
+} else {
+    Write-Log "No malicious files found (malicious_files_found: 0)"
+}
+
 ###############################################################################
 # SEND RESULTS
 ###############################################################################
@@ -585,6 +698,9 @@ if ($HIGH_RISK_DETAILS.Length -gt 1000) {
     $HIGH_RISK_DETAILS = $HIGH_RISK_DETAILS.Substring(0, 1000)
 }
 
+# Ensure malicious_files_found is always included, even if 0
+$maliciousFilesFound = if ($MALICIOUS_FILE_COUNT) { $MALICIOUS_FILE_COUNT } else { 0 }
+
 $resultBody = @{
     secret = $SECRET
     serial = $SERIAL
@@ -600,6 +716,7 @@ $resultBody = @{
     scan_duration_ms = $SCAN_DURATION
     scanner_version = $SCANNER_VERSION
     raw_output = $RAW_OUTPUT
+    malicious_files_found = $maliciousFilesFound
 } | ConvertTo-Json -Compress
 
 try {

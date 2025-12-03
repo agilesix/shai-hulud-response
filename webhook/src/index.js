@@ -29,7 +29,12 @@ export default {
       }
 
     } catch (err) {
-      return new Response('Error: ' + err.message, { status: 500 });
+      console.error('[ERROR] Worker error:', {
+        message: err.message,
+        stack: err.stack,
+        name: err.name
+      });
+      return new Response('Error: ' + err.message + '\nStack: ' + (err.stack || 'No stack trace'), { status: 500 });
     }
   }
 };
@@ -73,97 +78,181 @@ async function handleAcknowledgment(body, env) {
 
 // Handle scan result submissions
 async function handleScanResult(body, env) {
-  const accessToken = await getAccessToken(env);
-  
-  const now = new Date().toISOString();
-  const row = [
-    now,                              // Server Timestamp
-    body.serial || '',                // Serial
-    body.hostname || '',              // Hostname
-    body.user || '',                  // User
-    body.os || '',                    // OS (darwin/windows)
-    body.status || '',                // Status (clean/affected/error)
-    body.high_risk_count || 0,        // High Risk Count
-    body.medium_risk_count || 0,      // Medium Risk Count
-    body.low_risk_count || 0,         // Low Risk Count
-    body.high_risk_details || '',     // High Risk Details (comma-separated)
-    body.medium_risk_details || '',   // Medium Risk Details
-    body.scan_duration_ms || '',      // Scan Duration (ms)
-    body.scanner_version || '',       // Scanner Version
-    body.raw_output || ''             // Raw Output (truncated if needed)
-  ];
-
-  const range = 'Scan Results!A:N';
-  
-  const sheetsResponse = await fetch(
-    `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${range}:append?valueInputOption=USER_ENTERED`,
-    {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${accessToken}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ values: [row] })
+  try {
+    // Check required environment variables
+    if (!env.GOOGLE_SHEET_ID) {
+      console.error('[ERROR] GOOGLE_SHEET_ID is missing');
+      return new Response('Configuration error: GOOGLE_SHEET_ID not set', { status: 500 });
     }
-  );
+    
+    if (!env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+      console.error('[ERROR] GOOGLE_SERVICE_ACCOUNT_JSON is missing');
+      return new Response('Configuration error: GOOGLE_SERVICE_ACCOUNT_JSON not set', { status: 500 });
+    }
 
-  if (!sheetsResponse.ok) {
-    const error = await sheetsResponse.text();
-    return new Response('Sheets API error: ' + error, { status: 500 });
+    console.log('[DEBUG] Getting access token...');
+    const accessToken = await getAccessToken(env);
+    console.log('[DEBUG] Access token obtained');
+    
+    const now = new Date().toISOString();
+    
+    // Ensure malicious_files_found is always a number (default to 0 if missing or invalid)
+    const maliciousFilesFound = (typeof body.malicious_files_found === 'number')
+      ? body.malicious_files_found
+      : (parseInt(body.malicious_files_found) || 0);
+    
+    // Log the received payload for debugging
+    console.log('[DEBUG] Received scan result:', {
+      serial: body.serial,
+      hostname: body.hostname,
+      status: body.status,
+      high_risk_count: body.high_risk_count,
+      malicious_files_found_raw: body.malicious_files_found,
+      malicious_files_found_type: typeof body.malicious_files_found,
+      malicious_files_found_parsed: maliciousFilesFound
+    });
+    
+    const row = [
+      now,                              // Server Timestamp
+      body.serial || '',                // Serial
+      body.hostname || '',              // Hostname
+      body.user || '',                  // User
+      body.os || '',                    // OS (darwin/windows)
+      body.status || '',                // Status (clean/affected/error)
+      body.high_risk_count || 0,        // High Risk Count
+      body.medium_risk_count || 0,      // Medium Risk Count
+      body.low_risk_count || 0,         // Low Risk Count
+      body.high_risk_details || '',     // High Risk Details (comma-separated)
+      body.medium_risk_details || '',   // Medium Risk Details
+      body.scan_duration_ms || '',      // Scan Duration (ms)
+      body.scanner_version || '',       // Scanner Version
+      body.raw_output || '',            // Raw Output (truncated if needed)
+      maliciousFilesFound               // O: Malicious Files Found (always a number, defaults to 0)
+    ];
+
+    const range = 'Scan Results!A:O';
+    
+    // Log the row being sent to Google Sheets
+    console.log('[DEBUG] Row data being sent to Sheets:', {
+      rowLength: row.length,
+      columnO_value: row[14],
+      columnO_type: typeof row[14],
+      fullRow: row
+    });
+    
+    console.log('[DEBUG] Sending to Google Sheets:', {
+      sheetId: env.GOOGLE_SHEET_ID ? 'present' : 'missing',
+      range: range,
+      rowLength: row.length
+    });
+    
+    const sheetsResponse = await fetch(
+      `https://sheets.googleapis.com/v4/spreadsheets/${env.GOOGLE_SHEET_ID}/values/${range}:append?valueInputOption=USER_ENTERED`,
+      {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ values: [row] })
+      }
+    );
+
+    if (!sheetsResponse.ok) {
+      const error = await sheetsResponse.text();
+      console.error('[ERROR] Sheets API error:', {
+        status: sheetsResponse.status,
+        statusText: sheetsResponse.statusText,
+        error: error
+      });
+      return new Response('Sheets API error: ' + error, { status: 500 });
+    }
+
+    const responseData = await sheetsResponse.json();
+    console.log('[DEBUG] Successfully wrote to Sheets:', {
+      updatedRange: responseData.updates?.updatedRange,
+      updatedCells: responseData.updates?.updatedCells
+    });
+
+    return new Response('OK', { status: 200 });
+  } catch (err) {
+    console.error('[ERROR] handleScanResult error:', {
+      message: err.message,
+      stack: err.stack,
+      name: err.name
+    });
+    return new Response('Internal error: ' + err.message, { status: 500 });
   }
-
-  return new Response('OK', { status: 200 });
 }
 
 // Google Service Account JWT auth
 async function getAccessToken(env) {
-  const serviceAccount = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
+  try {
+    if (!env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+      throw new Error('GOOGLE_SERVICE_ACCOUNT_JSON is not set');
+    }
+    
+    let serviceAccount;
+    try {
+      serviceAccount = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    } catch (parseErr) {
+      console.error('[ERROR] Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON:', parseErr.message);
+      throw new Error('Invalid GOOGLE_SERVICE_ACCOUNT_JSON format: ' + parseErr.message);
+    }
 
-  const now = Math.floor(Date.now() / 1000);
+    const now = Math.floor(Date.now() / 1000);
 
-  const header = { alg: 'RS256', typ: 'JWT' };
-  const claim = {
-    iss: serviceAccount.client_email,
-    scope: 'https://www.googleapis.com/auth/spreadsheets',
-    aud: 'https://oauth2.googleapis.com/token',
-    iat: now,
-    exp: now + 3600
-  };
+    const header = { alg: 'RS256', typ: 'JWT' };
+    const claim = {
+      iss: serviceAccount.client_email,
+      scope: 'https://www.googleapis.com/auth/spreadsheets',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600
+    };
 
-  const encodedHeader = base64url(JSON.stringify(header));
-  const encodedClaim = base64url(JSON.stringify(claim));
-  const signatureInput = `${encodedHeader}.${encodedClaim}`;
+    const encodedHeader = base64url(JSON.stringify(header));
+    const encodedClaim = base64url(JSON.stringify(claim));
+    const signatureInput = `${encodedHeader}.${encodedClaim}`;
 
-  const privateKey = await crypto.subtle.importKey(
-    'pkcs8',
-    pemToArrayBuffer(serviceAccount.private_key),
-    { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
+    const privateKey = await crypto.subtle.importKey(
+      'pkcs8',
+      pemToArrayBuffer(serviceAccount.private_key),
+      { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
 
-  const signature = await crypto.subtle.sign(
-    'RSASSA-PKCS1-v1_5',
-    privateKey,
-    new TextEncoder().encode(signatureInput)
-  );
+    const signature = await crypto.subtle.sign(
+      'RSASSA-PKCS1-v1_5',
+      privateKey,
+      new TextEncoder().encode(signatureInput)
+    );
 
-  const encodedSignature = base64url(new Uint8Array(signature));
-  const jwt = `${encodedHeader}.${encodedClaim}.${encodedSignature}`;
+    const encodedSignature = base64url(new Uint8Array(signature));
+    const jwt = `${encodedHeader}.${encodedClaim}.${encodedSignature}`;
 
-  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
-  });
+    const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
+    });
 
-  if (!tokenResponse.ok) {
-    const error = await tokenResponse.text();
-    throw new Error('Token exchange failed: ' + error);
+    if (!tokenResponse.ok) {
+      const error = await tokenResponse.text();
+      throw new Error('Token exchange failed: ' + error);
+    }
+
+    const tokenData = await tokenResponse.json();
+    return tokenData.access_token;
+  } catch (err) {
+    console.error('[ERROR] getAccessToken error:', {
+      message: err.message,
+      stack: err.stack,
+      name: err.name
+    });
+    throw err;
   }
-
-  const tokenData = await tokenResponse.json();
-  return tokenData.access_token;
 }
 
 function base64url(input) {

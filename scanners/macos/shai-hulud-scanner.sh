@@ -2,7 +2,7 @@
 
 ###############################################################################
 # SHAI-HULUD 2.0 SCANNER - NATIVE ZSH VERSION
-# Version: 2.0.6
+# Version: 2.0.8
 # 
 # This script handles everything:
 # 1. When run by Kandji, it copies itself and launches in background
@@ -15,6 +15,14 @@
 # - Version-aware: Checks exact package:version against compromised list
 # - Performance-friendly: Runs at reduced priority
 # - Error capture: Reports environment issues to Google Sheets
+# - Malicious file detection: Detects files dropped by Shai-Hulud 2.0 payloads
+#
+# Changes in v2.0.8:
+# - Added malicious file detection (setup_bun.js, bun_environment.js, actionsSecrets.json)
+# - Added malicious workflow detection (formatter_*.yml, SHA1HULUD runners)
+# - Added rogue runner directory detection (~/.dev-env)
+# - Added discussion trigger backdoor detection
+# - New field: malicious_files_found in scan results
 #
 # Changes in v2.0.6:
 # - Removed dependency on Cobenian shai-hulud-detector.sh (requires Bash 5)
@@ -29,8 +37,19 @@
 
 WEBHOOK_URL="https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
 SECRET="YOUR_SHARED_SECRET_HERE"
-SCANNER_VERSION="2.0.7"
+SCANNER_VERSION="2.0.8"
 MAX_PROJECTS=200
+# Malicious files dropped by Shai-Hulud 2.0
+MALICIOUS_FILES=(
+  "setup_bun.js"
+  "bun_environment.js"
+  "actionsSecrets.json"
+)
+
+MALICIOUS_WORKFLOW_PATTERNS=(
+    "SHA1HULUD"
+    "formatter_"
+)
 
 # PERFORMANCE SETTINGS
 NICE_LEVEL=10
@@ -55,6 +74,18 @@ LOG_FILE="${WORK_DIR}/scanner.log"
 if [[ "$1" == "--background" ]]; then
   shift
   TEMP_DIR="$1"
+  # Ensure TEMP_DIR exists and is writable
+  mkdir -p "${TEMP_DIR}" || {
+    echo "ERROR: Cannot create temp directory: ${TEMP_DIR}" >&2
+    exit 1
+  }
+  # Ensure WORK_DIR exists for log file
+  mkdir -p "${WORK_DIR}" || {
+    echo "ERROR: Cannot create work directory: ${WORK_DIR}" >&2
+    exit 1
+  }
+  # Redirect stderr (log output) to log file in background mode, keep stdout for function returns
+  exec 2>> "${LOG_FILE}"
 else
   ###########################################################################
   # FOREGROUND MODE - Launch background and exit
@@ -99,8 +130,8 @@ else
     echo "✅ Scanner launched (PID: $BG_PID)"
     echo "Log: ${LOG_FILE}"
     echo "Results will be sent to webhook when complete."
-  else
-    echo "⚠️  Scanner may have exited - check ${LOG_FILE}"
+    else
+      echo "⚠️  Scanner may have exited - check ${LOG_FILE}"
   fi
   
   echo "Launcher exiting."
@@ -112,7 +143,7 @@ fi
 ###############################################################################
 
 log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >&2
 }
 
 cleanup() {
@@ -165,7 +196,7 @@ if [[ "$SKIP_IF_ON_BATTERY" == "true" ]]; then
   if [[ "$POWER_SOURCE" == *"Battery"* ]]; then
     log "On battery power - skipping scan (SKIP_IF_ON_BATTERY=true)"
     curl -s -X POST -H "Content-Type: application/json" \
-      -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"skipped\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"Skipped - on battery power\"}" \
+      -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"skipped\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"Skipped - on battery power\", \"malicious_files_found\": 0}" \
       "${WEBHOOK_URL}"
     exit 0
   fi
@@ -173,6 +204,24 @@ fi
 
 # Lower CPU priority
 renice ${NICE_LEVEL} $$ >/dev/null 2>&1 || true
+
+###############################################################################
+# ERROR HANDLING FUNCTION
+###############################################################################
+
+send_error() {
+  local msg="$1"
+  log "ERROR: $msg"
+  # Ensure device info is available (may be called early)
+  local error_serial="${SERIAL:-unknown}"
+  local error_hostname="${HOSTNAME:-unknown}"
+  local error_user="${CURRENT_USER:-unknown}"
+  # Escape the error message for JSON
+  local msg_escaped=$(echo "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g; s/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
+  curl -s -X POST -H "Content-Type: application/json" \
+    -d "{\"secret\": \"${SECRET}\", \"serial\": \"${error_serial}\", \"hostname\": \"${error_hostname}\", \"user\": \"${error_user}\", \"os\": \"macOS\", \"status\": \"error\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${msg_escaped}\", \"malicious_files_found\": 0}" \
+    "${WEBHOOK_URL}"
+}
 
 ###############################################################################
 # GATHER DEVICE INFO
@@ -193,18 +242,29 @@ log "Host: ${HOSTNAME} | Serial: ${SERIAL} | User: ${CURRENT_USER}"
 
 log "Step 2: Downloading compromised packages list..."
 
-PACKAGES_FILE="${TEMP_DIR}/compromised-packages.txt"
-
-send_error() {
-  local msg="$1"
-  log "ERROR: $msg"
-  curl -s -X POST -H "Content-Type: application/json" \
-    -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"error\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${msg}\"}" \
-    "${WEBHOOK_URL}"
+# Ensure TEMP_DIR exists
+mkdir -p "${TEMP_DIR}" || {
+  send_error "Cannot create temp directory: ${TEMP_DIR}"
+  exit 1
 }
 
-if ! curl -fsSL --connect-timeout 30 --max-time 60 "${PACKAGES_URL}" -o "${PACKAGES_FILE}" 2>&1; then
-  send_error "Failed to download compromised packages list"
+PACKAGES_FILE="${TEMP_DIR}/compromised-packages.txt"
+
+# Download with better error handling
+CURL_OUTPUT=$(curl -fsSL --connect-timeout 30 --max-time 60 "${PACKAGES_URL}" -o "${PACKAGES_FILE}" 2>&1)
+CURL_EXIT=$?
+
+if [[ $CURL_EXIT -ne 0 ]] || [[ ! -f "${PACKAGES_FILE}" ]]; then
+  log "ERROR: curl failed with exit code $CURL_EXIT"
+  log "ERROR: curl output: ${CURL_OUTPUT}"
+  send_error "Failed to download compromised packages list: ${CURL_OUTPUT}"
+  exit 1
+fi
+
+# Verify file was downloaded and has content
+if [[ ! -s "${PACKAGES_FILE}" ]]; then
+  log "ERROR: Downloaded file is empty or missing"
+  send_error "Downloaded compromised packages list is empty"
   exit 1
 fi
 
@@ -361,6 +421,111 @@ check_lockfile() {
 }
 
 ###############################################################################
+# MALICIOUS FILE DETECTION
+# Detects files dropped by Shai-Hulud 2.0 payload execution
+###############################################################################
+
+scan_malicious_files() {
+  local scan_dir="$1"
+  local found_files=()
+  
+  log "Scanning for malicious files..."
+  
+  # Check for known malicious files
+  for filename in "${MALICIOUS_FILES[@]}"; do
+    while IFS= read -r -d '' file; do
+      # Skip node_modules and test-cases directories to reduce noise
+      if [[ "$file" != *"/node_modules/"* ]] && \
+         [[ "$file" != *"/test-cases/"* ]] && \
+         [[ "$file" != *"/shai-hulud-detect"* ]]; then
+        found_files+=("$file")
+        log "  ⚠️  CRITICAL: Found malicious file: $file"
+      fi
+    done < <(find "$scan_dir" -name "$filename" -type f -print0 2>/dev/null)
+  done
+  
+  # Check for malicious GitHub workflow files
+  if [[ -d "$scan_dir/.github/workflows" ]]; then
+    # Check for formatter_*.yml files (Shai-Hulud 2.0 backdoor)
+    while IFS= read -r -d '' file; do
+      found_files+=("$file")
+      log "  ⚠️  CRITICAL: Found suspicious workflow: $file"
+    done < <(find "$scan_dir/.github/workflows" -name "formatter_*.yml" -type f -print0 2>/dev/null)
+    
+    # Check for SHA1HULUD references in workflow files
+    while IFS= read -r file; do
+      found_files+=("$file")
+      log "  ⚠️  CRITICAL: Found SHA1HULUD reference in: $file"
+    done < <(grep -l -r "SHA1HULUD" "$scan_dir/.github/workflows" 2>/dev/null || true)
+    
+    # Check for suspicious 'on: discussion' triggers (persistence backdoor)
+    # Match across newlines by reading file content
+    while IFS= read -r file; do
+      # Check if file contains "on:" followed by "discussion:" on next line
+      # Pattern: "on:" on one line, then "discussion:" on next line (with any indentation)
+      if awk '/^on:/{found=1; next} found && /discussion:/{exit 0} found && !/^\s/ && !/^$/{found=0} END {exit !found}' "$file" 2>/dev/null || \
+         grep -q "on:.*discussion" "$file" 2>/dev/null; then
+        found_files+=("$file")
+        log "  ⚠️  WARNING: Found discussion trigger backdoor in: $file"
+      fi
+    done < <(find "$scan_dir/.github/workflows" -name "*.yml" -type f 2>/dev/null)
+  fi
+  
+  # Check for .dev-env directory (rogue runner installation)
+  if [[ -d "$HOME/.dev-env" ]]; then
+    found_files+=("$HOME/.dev-env")
+    log "  ⚠️  CRITICAL: Found rogue runner directory: $HOME/.dev-env"
+  fi
+  
+  # Deduplicate found_files array (same file might match multiple patterns)
+  local unique_files=()
+  local seen
+  for file in "${found_files[@]}"; do
+    seen=0
+    for unique in "${unique_files[@]}"; do
+      if [[ "$file" == "$unique" ]]; then
+        seen=1
+        log "  (duplicate removed: $file)"
+        break
+      fi
+    done
+    if [[ $seen -eq 0 ]]; then
+      unique_files+=("$file")
+    fi
+  done
+  
+  # Log all detected files with full paths
+  log "Detected malicious files/directories (${#unique_files[@]} total):"
+  for file in "${unique_files[@]}"; do
+    log "  - $file"
+  done
+  
+  # Write results to desktop file for easy viewing
+  RESULTS_FILE="${HOME}/Desktop/shai-hulud-scan-results.txt"
+  {
+    echo "Shai-Hulud 2.0 Scanner - Malicious File Detection Results"
+    echo "Scan Date: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Scanner Version: ${SCANNER_VERSION}"
+    echo "Hostname: ${HOSTNAME}"
+    echo "User: ${CURRENT_USER}"
+    echo ""
+    echo "Total Malicious Items Found: ${#unique_files[@]}"
+    echo ""
+    echo "Detected Files/Directories:"
+    echo "=========================="
+    for file in "${unique_files[@]}"; do
+      echo "  - $file"
+    done
+    echo ""
+    echo "End of Report"
+  } > "${RESULTS_FILE}" 2>/dev/null || true
+  
+  log "Results written to: ${RESULTS_FILE}"
+  
+  echo "${#unique_files[@]}"
+}
+
+###############################################################################
 # SCAN PROJECTS
 ###############################################################################
 
@@ -373,6 +538,7 @@ HIGH_RISK_DETAILS=""
 MEDIUM_RISK_DETAILS=""
 RAW_OUTPUT=""
 OVERALL_STATUS="clean"
+MALICIOUS_FILE_COUNT=0
 
 PROJECT_COUNT=0
 
@@ -426,6 +592,27 @@ done
 
 [[ ${#NPM_PROJECTS[@]} -eq 0 ]] && RAW_OUTPUT="No npm projects found" && OVERALL_STATUS="clean"
 
+# Scan for malicious files in home directory
+MALICIOUS_FILE_COUNT=$(scan_malicious_files "$HOME" 2>&1 | tail -1)
+
+# Ensure MALICIOUS_FILE_COUNT is a number (default to 0 if not)
+# Trim whitespace and validate
+MALICIOUS_FILE_COUNT=$(echo "${MALICIOUS_FILE_COUNT}" | tr -d '[:space:]')
+if [[ -z "$MALICIOUS_FILE_COUNT" ]] || [[ ! "$MALICIOUS_FILE_COUNT" =~ ^[0-9]+$ ]]; then
+  MALICIOUS_FILE_COUNT=0
+fi
+
+# Always log the malicious file count (even if 0)
+if [[ ${MALICIOUS_FILE_COUNT:-0} -gt 0 ]]; then
+  log "⚠️  CRITICAL: Found $MALICIOUS_FILE_COUNT malicious files/directories!"
+  # Add to high risk count
+  HIGH_RISK_COUNT=$((HIGH_RISK_COUNT + MALICIOUS_FILE_COUNT))
+  HIGH_RISK_DETAILS="${HIGH_RISK_DETAILS}MALICIOUS_FILES:${MALICIOUS_FILE_COUNT};"
+  OVERALL_STATUS="affected"
+else
+  log "No malicious files found (malicious_files_found: 0)"
+fi
+
 # Prepend any warnings to raw output
 if [[ -n "$WARNINGS" ]]; then
   RAW_OUTPUT="[WARNINGS: ${WARNINGS}] ${RAW_OUTPUT}"
@@ -461,15 +648,18 @@ RAW_OUTPUT_ESCAPED=$(escape_json "$RAW_OUTPUT")
 HIGH_RISK_DETAILS_ESCAPED=$(escape_json "$HIGH_RISK_DETAILS")
 MEDIUM_RISK_DETAILS_ESCAPED=$(escape_json "$MEDIUM_RISK_DETAILS")
 
+# Send results to webhook (Cloudflare Worker -> Google Sheets)
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
-  -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"${OVERALL_STATUS}\", \"high_risk_count\": ${HIGH_RISK_COUNT}, \"medium_risk_count\": ${MEDIUM_RISK_COUNT}, \"low_risk_count\": ${LOW_RISK_COUNT}, \"high_risk_details\": \"${HIGH_RISK_DETAILS_ESCAPED}\", \"medium_risk_details\": \"${MEDIUM_RISK_DETAILS_ESCAPED}\", \"scan_duration_ms\": ${SCAN_DURATION}, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${RAW_OUTPUT_ESCAPED}\"}" \
+  -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"${OVERALL_STATUS}\", \"high_risk_count\": ${HIGH_RISK_COUNT}, \"medium_risk_count\": ${MEDIUM_RISK_COUNT}, \"low_risk_count\": ${LOW_RISK_COUNT}, \"high_risk_details\": \"${HIGH_RISK_DETAILS_ESCAPED}\", \"medium_risk_details\": \"${MEDIUM_RISK_DETAILS_ESCAPED}\", \"scan_duration_ms\": ${SCAN_DURATION}, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${RAW_OUTPUT_ESCAPED}\", \"malicious_files_found\": ${MALICIOUS_FILE_COUNT:-0}}" \
   "${WEBHOOK_URL}" 2>/dev/null)
 
 if [[ "${HTTP_CODE}" == "200" ]]; then
-  log "✅ Results sent successfully"
+  log "✅ Results sent successfully to webhook"
 else
   log "⚠️  Webhook returned: ${HTTP_CODE}"
 fi
-
 log "=== Scanner Complete ==="
 exit 0
+
+
+
