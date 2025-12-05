@@ -17,7 +17,7 @@
     - Malicious file detection: Detects files dropped by Shai-Hulud 2.0 payloads
     
 .VERSION
-    2.0.8
+    2.0.9
     
 .NOTES
     Deploy via Action1 MDM. Results sent to webhook -> Google Sheets.
@@ -29,8 +29,8 @@
 
 $WEBHOOK_URL = "https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
 $SECRET = "YOUR_SHARED_SECRET_HERE"
-$SCANNER_VERSION = "2.0.8"
-$MAX_PROJECTS = 200
+$SCANNER_VERSION = "2.0.9"
+$MAX_PROJECTS = 500
 
 # Malicious files dropped by Shai-Hulud 2.0
 $MALICIOUS_FILES = @(
@@ -245,6 +245,12 @@ if ($SKIP_IF_ON_BATTERY) {
                 scanner_version = $SCANNER_VERSION
                 raw_output = "Skipped - on battery power"
                 malicious_files_found = 0
+                projects_found = 0
+                projects_scanned = 0
+                ioc_count = 0
+                scan_dirs = ""
+                warnings = ""
+                scan_log = "Skipped - on battery power"
             } | ConvertTo-Json -Compress
             
             try {
@@ -329,6 +335,12 @@ function Send-ErrorReport {
         scanner_version = $SCANNER_VERSION
         raw_output = $Message
         malicious_files_found = 0
+        projects_found = 0
+        projects_scanned = 0
+        ioc_count = 0
+        scan_dirs = ""
+        warnings = ""
+        scan_log = "Error: $Message"
     } | ConvertTo-Json -Compress
     
     try {
@@ -553,7 +565,7 @@ foreach ($baseDir in $SCAN_DIRS) {
     if (-not (Test-Path $baseDir)) { continue }
     
     try {
-        $packageFiles = Get-ChildItem -Path $baseDir -Filter "package.json" -Recurse -Depth 6 -File -ErrorAction SilentlyContinue |
+        $packageFiles = Get-ChildItem -Path $baseDir -Filter "package.json" -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object {
                 $fp = $_.FullName
                 $fp -notmatch '\\node_modules\\' -and
@@ -701,6 +713,26 @@ if ($HIGH_RISK_DETAILS.Length -gt 1000) {
 # Ensure malicious_files_found is always included, even if 0
 $maliciousFilesFound = if ($MALICIOUS_FILE_COUNT) { $MALICIOUS_FILE_COUNT } else { 0 }
 
+# Calculate diagnostic fields
+$projectsFound = $NPM_PROJECTS.Count
+$projectsScanned = $projectNum
+$iocCount = $CompromisedPackages.Count
+
+# Format scan_dirs as comma-separated string
+$scanDirsStr = $SCAN_DIRS -join ","
+
+# Format warnings as string
+$warningsStr = if ($WARNINGS.Count -gt 0) { $WARNINGS -join "; " } else { "" }
+
+# Create scan_log summary (key events from the scan)
+$scanLog = "Scanner v$SCANNER_VERSION | Found $projectsFound projects | Scanned $projectsScanned | IOC list: $iocCount packages | Status: $OVERALL_STATUS"
+if ($HIGH_RISK_COUNT -gt 0) {
+    $scanLog = "$scanLog | High risk: $HIGH_RISK_COUNT"
+}
+if ($maliciousFilesFound -gt 0) {
+    $scanLog = "$scanLog | Malicious files: $maliciousFilesFound"
+}
+
 $resultBody = @{
     secret = $SECRET
     serial = $SERIAL
@@ -717,6 +749,12 @@ $resultBody = @{
     scanner_version = $SCANNER_VERSION
     raw_output = $RAW_OUTPUT
     malicious_files_found = $maliciousFilesFound
+    projects_found = $projectsFound
+    projects_scanned = $projectsScanned
+    ioc_count = $iocCount
+    scan_dirs = $scanDirsStr
+    warnings = $warningsStr
+    scan_log = $scanLog
 } | ConvertTo-Json -Compress
 
 try {

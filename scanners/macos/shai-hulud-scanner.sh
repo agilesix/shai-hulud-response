@@ -2,7 +2,7 @@
 
 ###############################################################################
 # SHAI-HULUD 2.0 SCANNER - NATIVE ZSH VERSION
-# Version: 2.0.8
+# Version: 2.0.9
 # 
 # This script handles everything:
 # 1. When run by Kandji, it copies itself and launches in background
@@ -16,6 +16,10 @@
 # - Performance-friendly: Runs at reduced priority
 # - Error capture: Reports environment issues to Google Sheets
 # - Malicious file detection: Detects files dropped by Shai-Hulud 2.0 payloads
+#
+# Changes in v2.0.9:
+# - Added diagnostic fields: projects_found, projects_scanned, ioc_count, scan_dirs, warnings, scan_log
+# - Enhanced reporting to match webhook v2.0.9 requirements
 #
 # Changes in v2.0.8:
 # - Added malicious file detection (setup_bun.js, bun_environment.js, actionsSecrets.json)
@@ -37,8 +41,8 @@
 
 WEBHOOK_URL="https://kandji-ack-worker.anthony-arashiro.workers.dev/scan"
 SECRET="YOUR_SHARED_SECRET_HERE"
-SCANNER_VERSION="2.0.8"
-MAX_PROJECTS=200
+SCANNER_VERSION="2.0.9"
+MAX_PROJECTS=500
 # Malicious files dropped by Shai-Hulud 2.0
 MALICIOUS_FILES=(
   "setup_bun.js"
@@ -59,9 +63,8 @@ SKIP_IF_ON_BATTERY=false
 # Compromised packages list (plain text, one package:version per line)
 PACKAGES_URL="https://raw.githubusercontent.com/agilesix/shai-hulud-response/main/ioc/compromised-packages.txt"
 
-SCAN_DIRS=(
-  "/Users"
-)
+# SCAN_DIRS will be set after user detection (see below)
+SCAN_DIRS=()
 
 WORK_DIR="/var/tmp/shai-hulud"
 LOCK_FILE="/tmp/shai-hulud-scanner.lock"
@@ -196,7 +199,7 @@ if [[ "$SKIP_IF_ON_BATTERY" == "true" ]]; then
   if [[ "$POWER_SOURCE" == *"Battery"* ]]; then
     log "On battery power - skipping scan (SKIP_IF_ON_BATTERY=true)"
     curl -s -X POST -H "Content-Type: application/json" \
-      -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"skipped\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"Skipped - on battery power\", \"malicious_files_found\": 0}" \
+      -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"skipped\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"Skipped - on battery power\", \"malicious_files_found\": 0, \"projects_found\": 0, \"projects_scanned\": 0, \"ioc_count\": 0, \"scan_dirs\": \"\", \"warnings\": \"\", \"scan_log\": \"Skipped - on battery power\"}" \
       "${WEBHOOK_URL}"
     exit 0
   fi
@@ -219,7 +222,7 @@ send_error() {
   # Escape the error message for JSON
   local msg_escaped=$(echo "$msg" | sed 's/\\/\\\\/g; s/"/\\"/g; s/$/\\n/' | tr -d '\n' | sed 's/\\n$//')
   curl -s -X POST -H "Content-Type: application/json" \
-    -d "{\"secret\": \"${SECRET}\", \"serial\": \"${error_serial}\", \"hostname\": \"${error_hostname}\", \"user\": \"${error_user}\", \"os\": \"macOS\", \"status\": \"error\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${msg_escaped}\", \"malicious_files_found\": 0}" \
+    -d "{\"secret\": \"${SECRET}\", \"serial\": \"${error_serial}\", \"hostname\": \"${error_hostname}\", \"user\": \"${error_user}\", \"os\": \"macOS\", \"status\": \"error\", \"high_risk_count\": 0, \"medium_risk_count\": 0, \"low_risk_count\": 0, \"high_risk_details\": \"\", \"medium_risk_details\": \"\", \"scan_duration_ms\": 0, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${msg_escaped}\", \"malicious_files_found\": 0, \"projects_found\": 0, \"projects_scanned\": 0, \"ioc_count\": 0, \"scan_dirs\": \"\", \"warnings\": \"\", \"scan_log\": \"Error: ${msg_escaped}\"}" \
     "${WEBHOOK_URL}"
 }
 
@@ -234,7 +237,30 @@ SERIAL=$(/usr/sbin/ioreg -l | /usr/bin/awk -F\" '/IOPlatformSerialNumber/ { prin
 HOSTNAME=$(/usr/sbin/scutil --get ComputerName 2>/dev/null || hostname)
 START_TIME=$(date +%s)
 
-log "Host: ${HOSTNAME} | Serial: ${SERIAL} | User: ${CURRENT_USER}"
+# Detect logged-in user's home directory (important for MDM execution)
+# When run via Kandji as root, $HOME points to /var/root, not the logged-in user's directory
+# We scan the ENTIRE home directory recursively, which includes:
+#   - Documents, Desktop, Downloads
+#   - Projects, Code, Development (any folder names)
+#   - All subdirectories at any depth
+if [[ -n "$CURRENT_USER" && "$CURRENT_USER" != "root" && "$CURRENT_USER" != "loginwindow" ]]; then
+  USER_HOME=$(dscl . -read "/Users/$CURRENT_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+  if [[ -n "$USER_HOME" && -d "$USER_HOME" ]]; then
+    SCAN_DIRS=("$USER_HOME")
+    log "Detected logged-in user: ${CURRENT_USER} | Home: ${USER_HOME}"
+    log "Scanning entire home directory recursively (includes Documents, Desktop, Projects, etc.)"
+  else
+    # Fallback to $HOME if dscl fails
+    SCAN_DIRS=("$HOME")
+    log "Using fallback home directory: ${HOME}"
+  fi
+else
+  # No user logged in or running as root - use $HOME as fallback
+  SCAN_DIRS=("$HOME")
+  log "No logged-in user detected, using: ${HOME}"
+fi
+
+log "Host: ${HOSTNAME} | Serial: ${SERIAL} | User: ${CURRENT_USER} | Scan Dir: ${SCAN_DIRS[1]}"
 
 ###############################################################################
 # DOWNLOAD COMPROMISED PACKAGES LIST
@@ -292,15 +318,13 @@ NPM_PROJECTS=()
 
 for base_dir in "${SCAN_DIRS[@]}"; do
   if [[ -d "$base_dir" ]]; then
-    while IFS= read -r -d '' pkg_json; do
-      project_dir=$(dirname "$pkg_json")
-      NPM_PROJECTS+=("$project_dir")
-      
-      if [[ ${#NPM_PROJECTS[@]} -ge $MAX_PROJECTS ]]; then
-        log "Reached project limit (${MAX_PROJECTS})"
-        break 2
-      fi
-    done < <(find "$base_dir" -maxdepth 6 -name "package.json" -type f \
+    log "Scanning directory: ${base_dir}"
+    
+    # Use a temporary file to collect results for better reliability
+    TEMP_FIND_OUTPUT="${TEMP_DIR}/find_output_$$.txt"
+    
+    # Run find and collect all results first (more reliable than process substitution)
+    find "$base_dir" -name "package.json" -type f \
       -not -path "*/node_modules/*" \
       -not -path "*/.npm/*" \
       -not -path "*/.nvm/versions/*" \
@@ -312,7 +336,26 @@ for base_dir in "${SCAN_DIRS[@]}"; do
       -not -path "*/Application Support/*" \
       -not -path "*/test-cases/*" \
       -not -path "*/*shai-hulud-detect*/*" \
-      -print0 2>/dev/null)
+      -print0 > "${TEMP_FIND_OUTPUT}" 2>/dev/null
+    
+    FIND_EXIT=$?
+    if [[ $FIND_EXIT -ne 0 ]]; then
+      log "WARNING: find command exited with code ${FIND_EXIT} for ${base_dir}"
+    fi
+    
+    # Read results from temp file
+    while IFS= read -r -d '' pkg_json; do
+      project_dir=$(dirname "$pkg_json")
+      NPM_PROJECTS+=("$project_dir")
+      
+      if [[ ${#NPM_PROJECTS[@]} -ge $MAX_PROJECTS ]]; then
+        log "Reached project limit (${MAX_PROJECTS})"
+        break
+      fi
+    done < "${TEMP_FIND_OUTPUT}"
+    
+    # Clean up temp file
+    rm -f "${TEMP_FIND_OUTPUT}" 2>/dev/null
   fi
 done
 
@@ -628,6 +671,23 @@ SCAN_DURATION=$(( (END_TIME - START_TIME) * 1000 ))
 log "Step 5: Sending results..."
 log "Status: ${OVERALL_STATUS} | High: ${HIGH_RISK_COUNT} | Medium: ${MEDIUM_RISK_COUNT} | Duration: ${SCAN_DURATION}ms"
 
+# Calculate diagnostic fields
+PROJECTS_FOUND=${#NPM_PROJECTS[@]}
+PROJECTS_SCANNED=$PROJECT_COUNT
+IOC_COUNT=$PACKAGE_COUNT
+
+# Format scan_dirs as comma-separated string
+SCAN_DIRS_STR=$(IFS=','; echo "${SCAN_DIRS[*]}")
+
+# Create scan_log summary (key events from the scan)
+SCAN_LOG="Scanner v${SCANNER_VERSION} | Found ${PROJECTS_FOUND} projects | Scanned ${PROJECTS_SCANNED} | IOC list: ${IOC_COUNT} packages | Status: ${OVERALL_STATUS}"
+if [[ ${HIGH_RISK_COUNT} -gt 0 ]]; then
+  SCAN_LOG="${SCAN_LOG} | High risk: ${HIGH_RISK_COUNT}"
+fi
+if [[ ${MALICIOUS_FILE_COUNT:-0} -gt 0 ]]; then
+  SCAN_LOG="${SCAN_LOG} | Malicious files: ${MALICIOUS_FILE_COUNT}"
+fi
+
 # Truncate for webhook
 RAW_OUTPUT="${RAW_OUTPUT:0:5000}"
 HIGH_RISK_DETAILS="${HIGH_RISK_DETAILS:0:1000}"
@@ -647,10 +707,13 @@ escape_json() {
 RAW_OUTPUT_ESCAPED=$(escape_json "$RAW_OUTPUT")
 HIGH_RISK_DETAILS_ESCAPED=$(escape_json "$HIGH_RISK_DETAILS")
 MEDIUM_RISK_DETAILS_ESCAPED=$(escape_json "$MEDIUM_RISK_DETAILS")
+WARNINGS_ESCAPED=$(escape_json "$WARNINGS")
+SCAN_LOG_ESCAPED=$(escape_json "$SCAN_LOG")
+SCAN_DIRS_ESCAPED=$(escape_json "$SCAN_DIRS_STR")
 
 # Send results to webhook (Cloudflare Worker -> Google Sheets)
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" \
-  -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"${OVERALL_STATUS}\", \"high_risk_count\": ${HIGH_RISK_COUNT}, \"medium_risk_count\": ${MEDIUM_RISK_COUNT}, \"low_risk_count\": ${LOW_RISK_COUNT}, \"high_risk_details\": \"${HIGH_RISK_DETAILS_ESCAPED}\", \"medium_risk_details\": \"${MEDIUM_RISK_DETAILS_ESCAPED}\", \"scan_duration_ms\": ${SCAN_DURATION}, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${RAW_OUTPUT_ESCAPED}\", \"malicious_files_found\": ${MALICIOUS_FILE_COUNT:-0}}" \
+  -d "{\"secret\": \"${SECRET}\", \"serial\": \"${SERIAL}\", \"hostname\": \"${HOSTNAME}\", \"user\": \"${CURRENT_USER}\", \"os\": \"macOS\", \"status\": \"${OVERALL_STATUS}\", \"high_risk_count\": ${HIGH_RISK_COUNT}, \"medium_risk_count\": ${MEDIUM_RISK_COUNT}, \"low_risk_count\": ${LOW_RISK_COUNT}, \"high_risk_details\": \"${HIGH_RISK_DETAILS_ESCAPED}\", \"medium_risk_details\": \"${MEDIUM_RISK_DETAILS_ESCAPED}\", \"scan_duration_ms\": ${SCAN_DURATION}, \"scanner_version\": \"${SCANNER_VERSION}\", \"raw_output\": \"${RAW_OUTPUT_ESCAPED}\", \"malicious_files_found\": ${MALICIOUS_FILE_COUNT:-0}, \"projects_found\": ${PROJECTS_FOUND}, \"projects_scanned\": ${PROJECTS_SCANNED}, \"ioc_count\": ${IOC_COUNT}, \"scan_dirs\": \"${SCAN_DIRS_ESCAPED}\", \"warnings\": \"${WARNINGS_ESCAPED}\", \"scan_log\": \"${SCAN_LOG_ESCAPED}\"}" \
   "${WEBHOOK_URL}" 2>/dev/null)
 
 if [[ "${HTTP_CODE}" == "200" ]]; then

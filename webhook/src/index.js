@@ -76,6 +76,20 @@ async function handleAcknowledgment(body, env) {
   return new Response('OK', { status: 200 });
 }
 
+// Helper function to safely parse integers with default value
+function parseIntSafe(value, defaultValue) {
+  if (typeof value === 'number') return value;
+  const parsed = parseInt(value);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
+// Helper function to truncate strings with max length
+function truncate(str, maxLen) {
+  if (!str) return '';
+  if (typeof str !== 'string') str = String(str);
+  return str.length > maxLen ? str.substring(0, maxLen) + '...[truncated]' : str;
+}
+
 // Handle scan result submissions
 async function handleScanResult(body, env) {
   try {
@@ -101,36 +115,55 @@ async function handleScanResult(body, env) {
       ? body.malicious_files_found
       : (parseInt(body.malicious_files_found) || 0);
     
+    // Parse new diagnostic fields with safe defaults
+    const projectsFound = parseIntSafe(body.projects_found, 0);
+    const projectsScanned = parseIntSafe(body.projects_scanned, 0);
+    const iocCount = parseIntSafe(body.ioc_count, 0);
+    
+    // Truncate string fields to prevent overflow
+    const warnings = truncate(body.warnings || '', 500);
+    const scanLog = truncate(body.scan_log || '', 10000);
+    const highRiskDetails = truncate(body.high_risk_details || '', 1000);
+    const mediumRiskDetails = truncate(body.medium_risk_details || '', 1000);
+    const rawOutput = truncate(body.raw_output || '', 5000);
+    
     // Log the received payload for debugging
     console.log('[DEBUG] Received scan result:', {
       serial: body.serial,
       hostname: body.hostname,
       status: body.status,
       high_risk_count: body.high_risk_count,
-      malicious_files_found_raw: body.malicious_files_found,
-      malicious_files_found_type: typeof body.malicious_files_found,
-      malicious_files_found_parsed: maliciousFilesFound
+      malicious_files_found: maliciousFilesFound,
+      projects_found: projectsFound,
+      projects_scanned: projectsScanned,
+      ioc_count: iocCount
     });
     
     const row = [
-      now,                              // Server Timestamp
-      body.serial || '',                // Serial
-      body.hostname || '',              // Hostname
-      body.user || '',                  // User
-      body.os || '',                    // OS (darwin/windows)
-      body.status || '',                // Status (clean/affected/error)
-      body.high_risk_count || 0,        // High Risk Count
-      body.medium_risk_count || 0,      // Medium Risk Count
-      body.low_risk_count || 0,         // Low Risk Count
-      body.high_risk_details || '',     // High Risk Details (comma-separated)
-      body.medium_risk_details || '',   // Medium Risk Details
-      body.scan_duration_ms || '',      // Scan Duration (ms)
-      body.scanner_version || '',       // Scanner Version
-      body.raw_output || '',            // Raw Output (truncated if needed)
-      maliciousFilesFound               // O: Malicious Files Found (always a number, defaults to 0)
+      now,                              // A: Server Timestamp
+      body.serial || '',                // B: Serial
+      body.hostname || '',              // C: Hostname
+      body.user || '',                  // D: User
+      body.os || '',                    // E: OS (darwin/windows)
+      body.status || '',                // F: Status (clean/affected/error)
+      body.high_risk_count || 0,        // G: High Risk Count
+      body.medium_risk_count || 0,      // H: Medium Risk Count
+      body.low_risk_count || 0,         // I: Low Risk Count
+      highRiskDetails,                  // J: High Risk Details
+      mediumRiskDetails,                 // K: Medium Risk Details
+      body.scan_duration_ms || '',       // L: Scan Duration (ms)
+      body.scanner_version || '',        // M: Scanner Version
+      rawOutput,                         // N: Raw Output
+      maliciousFilesFound,               // O: Malicious Files Found
+      projectsFound,                     // P: Projects Found (NEW)
+      projectsScanned,                   // Q: Projects Scanned (NEW)
+      iocCount,                          // R: IOC Count (NEW)
+      body.scan_dirs || '',              // S: Scan Dirs (NEW)
+      warnings,                          // T: Warnings (NEW)
+      scanLog                            // U: Scan Log (NEW)
     ];
 
-    const range = 'Scan Results!A:O';
+    const range = 'Scan Results!A:U';
     
     // Log the row being sent to Google Sheets
     console.log('[DEBUG] Row data being sent to Sheets:', {
@@ -163,7 +196,7 @@ async function handleScanResult(body, env) {
       console.error('[ERROR] Sheets API error:', {
         status: sheetsResponse.status,
         statusText: sheetsResponse.statusText,
-        error: error
+        error
       });
       return new Response('Sheets API error: ' + error, { status: 500 });
     }
