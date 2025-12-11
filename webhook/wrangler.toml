@@ -11,6 +11,7 @@ compatibility_date = "2024-01-01"
 [vars]
 # SHEET_NAME can remain public as it's just a sheet tab name
 SHEET_NAME = "Acknowledgements"
+GEO_BLOCK_MODE = "flag"
 
 [observability]
 [observability.logs]
